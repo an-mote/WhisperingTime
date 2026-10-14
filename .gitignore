@@ -28,7 +28,8 @@ migrate_working_dir/
 .flutter-plugins-dependencies
 .pub-cache/
 .pub/
-/build/
+/App/WhisperingTime/build/
+/App/WhisperingTime/ios/build/
 
 # Symbolication related
 app.*.symbols
@@ -37,10 +38,18 @@ app.*.symbols
 app.*.map.json
 
 # Android Studio will place build artifacts here
-/android/app/debug
-/android/app/profile
-/android/app/release
+/App/WhisperingTime/android/app/debug
+/App/WhisperingTime/android/app/profile
+/App/WhisperingTime/android/app/release
 
 # test folder
-/test
+/App/WhisperingTime/test
 todo
+
+# 本机代码图谱与研发产物
+/.codebase-memory/
+/Research/artifacts/
+
+# 对话临时文件；保留目录入口
+/TMP/*
+!/TMP/.gitkeep
