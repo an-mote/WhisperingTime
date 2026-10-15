@@ -1,2 +1,44 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<Scheme LastUpgradeVersion="2700" version="1.7"><BuildAction parallelizeBuildables="YES" buildImplicitDependencies="YES"><BuildActionEntries><BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="YES" buildForArchiving="YES" buildForAnalyzing="YES"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="000000000000000000000019" BuildableName="WhisperingTime.app" BlueprintName="WhisperingTime" ReferencedContainer="container:WhisperingTime.xcodeproj"/></BuildActionEntry></BuildActionEntries></BuildAction><TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES"><Testables><TestableReference skipped="NO"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="00000000000000000000001D" BuildableName="WhisperingTimeTests.xctest" BlueprintName="WhisperingTimeTests" ReferencedContainer="container:WhisperingTime.xcodeproj"/></TestableReference><TestableReference skipped="NO"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="000000000000000000000021" BuildableName="WhisperingTimeUITests.xctest" BlueprintName="WhisperingTimeUITests" ReferencedContainer="container:WhisperingTime.xcodeproj"/></TestableReference></Testables></TestAction><LaunchAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" launchStyle="0" useCustomWorkingDirectory="NO" ignoresPersistentStateOnLaunch="NO" debugDocumentVersioning="YES" debugServiceExtension="internal" allowLocationSimulation="YES"><BuildableProductRunnable runnableDebuggingMode="0"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="000000000000000000000019" BuildableName="WhisperingTime.app" BlueprintName="WhisperingTime" ReferencedContainer="container:WhisperingTime.xcodeproj"/></BuildableProductRunnable></LaunchAction><ProfileAction buildConfiguration="Release" shouldUseLaunchSchemeArgsEnv="YES" savedToolIdentifier="" useCustomWorkingDirectory="NO" debugDocumentVersioning="YES"><BuildableProductRunnable runnableDebuggingMode="0"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="000000000000000000000019" BuildableName="WhisperingTime.app" BlueprintName="WhisperingTime" ReferencedContainer="container:WhisperingTime.xcodeproj"/></BuildableProductRunnable></ProfileAction><AnalyzeAction buildConfiguration="Debug"/><ArchiveAction buildConfiguration="Release" revealArchiveInOrganizer="YES"/></Scheme>
+<Scheme LastUpgradeVersion="2700" version="1.7">
+  <BuildAction parallelizeBuildables="YES" buildImplicitDependencies="YES">
+    <BuildActionEntries>
+      <BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="YES" buildForArchiving="YES" buildForAnalyzing="YES">
+        <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="000000000000000000000019" BuildableName="WhisperingTime.app" BlueprintName="WhisperingTimeApp" ReferencedContainer="container:WhisperingTime.xcodeproj" />
+      </BuildActionEntry>
+      <BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="YES" buildForArchiving="YES" buildForAnalyzing="NO">
+        <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="00000000000000000000002C" BuildableName="WhisperingTime" BlueprintName="WhisperingTime" ReferencedContainer="container:WhisperingTime.xcodeproj" />
+      </BuildActionEntry>
+    </BuildActionEntries>
+  </BuildAction>
+  <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES">
+    <PreActions>
+      <ExecutionAction ActionType="Xcode.IDEStandardExecutionActionsCore.ExecutionActionType.ShellScriptAction">
+        <ActionContent title="等待主机自动化测试完成" scriptText="set -eu&#10;while ! /usr/bin/env python3 &quot;$SRCROOT/Scripts/host-automation.py&quot; wait; do&#10;  printf '%s\n' '无法确认主机测试状态，三秒后重新检查。' &gt;&amp;2&#10;  /bin/sleep 3&#10;done&#10;">
+          <EnvironmentBuildable>
+            <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="000000000000000000000019" BuildableName="WhisperingTime.app" BlueprintName="WhisperingTimeApp" ReferencedContainer="container:WhisperingTime.xcodeproj" />
+          </EnvironmentBuildable>
+        </ActionContent>
+      </ExecutionAction>
+    </PreActions>
+    <Testables>
+      <TestableReference skipped="NO">
+        <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="00000000000000000000001D" BuildableName="WhisperingTimeTests.xctest" BlueprintName="WhisperingTimeTests" ReferencedContainer="container:WhisperingTime.xcodeproj" />
+      </TestableReference>
+      <TestableReference skipped="NO">
+        <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="000000000000000000000021" BuildableName="WhisperingTimeUITests.xctest" BlueprintName="WhisperingTimeUITests" ReferencedContainer="container:WhisperingTime.xcodeproj" />
+      </TestableReference>
+    </Testables>
+  </TestAction>
+  <LaunchAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" launchStyle="0" useCustomWorkingDirectory="NO" ignoresPersistentStateOnLaunch="NO" debugDocumentVersioning="YES" debugServiceExtension="internal" allowLocationSimulation="YES">
+    <BuildableProductRunnable runnableDebuggingMode="0">
+      <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="000000000000000000000019" BuildableName="WhisperingTime.app" BlueprintName="WhisperingTimeApp" ReferencedContainer="container:WhisperingTime.xcodeproj" />
+    </BuildableProductRunnable>
+  </LaunchAction>
+  <ProfileAction buildConfiguration="Release" shouldUseLaunchSchemeArgsEnv="YES" savedToolIdentifier="" useCustomWorkingDirectory="NO" debugDocumentVersioning="YES">
+    <BuildableProductRunnable runnableDebuggingMode="0">
+      <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="000000000000000000000019" BuildableName="WhisperingTime.app" BlueprintName="WhisperingTimeApp" ReferencedContainer="container:WhisperingTime.xcodeproj" />
+    </BuildableProductRunnable>
+  </ProfileAction>
+  <AnalyzeAction buildConfiguration="Debug" />
+  <ArchiveAction buildConfiguration="Release" revealArchiveInOrganizer="YES" />
+</Scheme>

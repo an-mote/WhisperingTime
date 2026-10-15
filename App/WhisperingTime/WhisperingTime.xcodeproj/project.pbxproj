@@ -54,7 +54,7 @@
 		};
 		"000000000000000000000009" = {
 			"isa" = "PBXGroup";
-			"children" = ("000000000000000000000004","000000000000000000000005","000000000000000000000006","000000000000000000000007","000000000000000000000008");
+			"children" = ("000000000000000000000004","000000000000000000000005","000000000000000000000006","000000000000000000000007","00000000000000000000002D","000000000000000000000008");
 			"sourceTree" = "<group>";
 		};
 		"00000000000000000000000A" = {
@@ -195,7 +195,7 @@
 "ENABLE_HARDENED_RUNTIME" = "NO";
 				"PRODUCT_NAME" = "$(TARGET_NAME)";
 				"GENERATE_INFOPLIST_FILE" = "YES";
-				"TEST_TARGET_NAME" = "WhisperingTime";
+				"TEST_TARGET_NAME" = "WhisperingTimeApp";
 				"LD_RUNPATH_SEARCH_PATHS" = "$(inherited) @executable_path/../Frameworks @loader_path/../Frameworks";
 				"SWIFT_OPTIMIZATION_LEVEL" = "-Onone";
 				"DEBUG_INFORMATION_FORMAT" = "dwarf";
@@ -211,7 +211,7 @@
 "ENABLE_HARDENED_RUNTIME" = "NO";
 				"PRODUCT_NAME" = "$(TARGET_NAME)";
 				"GENERATE_INFOPLIST_FILE" = "YES";
-				"TEST_TARGET_NAME" = "WhisperingTime";
+				"TEST_TARGET_NAME" = "WhisperingTimeApp";
 				"LD_RUNPATH_SEARCH_PATHS" = "$(inherited) @executable_path/../Frameworks @loader_path/../Frameworks";
 				"SWIFT_OPTIMIZATION_LEVEL" = "-O";
 				"DEBUG_INFORMATION_FORMAT" = "dwarf-with-dsym";
@@ -249,7 +249,7 @@
 			"buildRules" = ();
 			"dependencies" = ();
 			"fileSystemSynchronizedGroups" = ("000000000000000000000004","000000000000000000000005");
-			"name" = "WhisperingTime";
+			"name" = "WhisperingTimeApp";
 			"productName" = "WhisperingTime";
 			"productReference" = "000000000000000000000001";
 			"productType" = "com.apple.product-type.application";
@@ -344,14 +344,14 @@
 			"productRefGroup" = "000000000000000000000008";
 			"projectDirPath" = "";
 			"projectRoot" = "";
-			"targets" = ("000000000000000000000019","00000000000000000000001D","000000000000000000000021");
+			"targets" = ("00000000000000000000002C","000000000000000000000019","00000000000000000000001D","000000000000000000000021");
 		};
 		"000000000000000000000023" = {
 			"isa" = "PBXContainerItemProxy";
 			"containerPortal" = "000000000000000000000022";
 			"proxyType" = "1";
 			"remoteGlobalIDString" = "000000000000000000000019";
-			"remoteInfo" = "WhisperingTime";
+			"remoteInfo" = "WhisperingTimeApp";
 		};
 		"000000000000000000000024" = {
 			"isa" = "PBXTargetDependency";
@@ -363,12 +363,65 @@
 			"containerPortal" = "000000000000000000000022";
 			"proxyType" = "1";
 			"remoteGlobalIDString" = "000000000000000000000019";
-			"remoteInfo" = "WhisperingTime";
+			"remoteInfo" = "WhisperingTimeApp";
 		};
 		"000000000000000000000026" = {
 			"isa" = "PBXTargetDependency";
 			"target" = "000000000000000000000019";
 			"targetProxy" = "000000000000000000000025";
+		};
+		"000000000000000000000027" = {
+			"isa" = "XCBuildConfiguration";
+			"buildSettings" = {
+				"ENABLE_USER_SCRIPT_SANDBOXING" = "NO";
+				"SKIP_INSTALL" = "YES";
+			};
+			"name" = "Debug";
+		};
+		"000000000000000000000028" = {
+			"isa" = "XCBuildConfiguration";
+			"buildSettings" = {
+				"ENABLE_USER_SCRIPT_SANDBOXING" = "NO";
+				"SKIP_INSTALL" = "YES";
+			};
+			"name" = "Release";
+		};
+		"000000000000000000000029" = {
+			"isa" = "XCConfigurationList";
+			"buildConfigurations" = ("000000000000000000000027","000000000000000000000028");
+			"defaultConfigurationIsVisible" = "0";
+			"defaultConfigurationName" = "Release";
+		};
+		"00000000000000000000002A" = {
+			"isa" = "PBXShellScriptBuildPhase";
+			"alwaysOutOfDate" = "1";
+			"buildActionMask" = "2147483647";
+			"files" = ();
+			"inputPaths" = ("$(SRCROOT)/Scripts/update-desktop-app.sh","$(SRCROOT)/Scripts/update-desktop-app.swift","$(BUILT_PRODUCTS_DIR)/WhisperingTime.app");
+			"name" = "更新桌面最新版应用替身";
+			"outputPaths" = ();
+			"runOnlyForDeploymentPostprocessing" = "0";
+			"shellPath" = "/bin/bash";
+			"shellScript" = "set -euo pipefail\n\"$SRCROOT/Scripts/update-desktop-app.sh\" \"$BUILT_PRODUCTS_DIR/WhisperingTime.app\"\n";
+			"showEnvVarsInLog" = "0";
+		};
+		"00000000000000000000002B" = {
+			"isa" = "PBXTargetDependency";
+			"target" = "000000000000000000000019";
+			"targetProxy" = "000000000000000000000023";
+		};
+		"00000000000000000000002C" = {
+			"isa" = "PBXAggregateTarget";
+			"buildConfigurationList" = "000000000000000000000029";
+			"buildPhases" = ("00000000000000000000002A");
+			"dependencies" = ("00000000000000000000002B");
+			"name" = "WhisperingTime";
+			"productName" = "WhisperingTime";
+		};
+		"00000000000000000000002D" = {
+			"isa" = "PBXFileSystemSynchronizedRootGroup";
+			"path" = "Scripts";
+			"sourceTree" = "<group>";
 		};
 	};
 	"rootObject" = "000000000000000000000022";
