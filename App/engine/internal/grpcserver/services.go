@@ -360,7 +360,7 @@ func (s *Service) ExportAllConfig(ctx context.Context, _ *pb.ExportAllConfigRequ
 	}
 	taskID, err := db.ExportAllThemesConfig(uoid)
 	if err != nil {
-		return &pb.BasicResponse{Err: 1, Msg: err.Error()}, nil
+		return &pb.BasicResponse{Err: 1, Msg: db.BackupErrorMessage(err)}, nil
 	}
 	return &pb.BasicResponse{Err: 0, Msg: taskID}, nil
 }
@@ -568,8 +568,33 @@ func (s *Service) ExportGroupConfig(ctx context.Context, req *pb.ExportGroupConf
 
 // ImportGroupConfig: client streaming bytes
 func (s *Service) ImportGroupConfig(stream pb.GroupService_ImportGroupConfigServer) error {
-	log.Infof("[grpc] ImportGroupConfig not implemented")
-	return status.Error(codes.Unimplemented, "not implemented")
+	uoid := getUOID(stream.Context())
+	if uoid == "" {
+		return status.Error(codes.Unauthenticated, "unauthenticated")
+	}
+	var archive bytes.Buffer
+	for {
+		chunk, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if len(chunk.GetData()) > 64*1024 || archive.Len() > db.BackupMaxBytes-len(chunk.GetData()) {
+			return status.Error(codes.ResourceExhausted, "备份分块超过 64 KiB 或文件超过 256 MiB")
+		}
+		archive.Write(chunk.GetData())
+	}
+	summary, err := db.ImportBackup(stream.Context(), db.DB, uoid, minioSvc.GetClient(), archive.Bytes())
+	if err != nil {
+		return stream.SendAndClose(&pb.ImportGroupConfigResponse{Err: 1, Msg: db.BackupErrorMessage(err)})
+	}
+	encoded, err := json.Marshal(summary)
+	if err != nil {
+		return status.Error(codes.Internal, "无法生成恢复结果")
+	}
+	return stream.SendAndClose(&pb.ImportGroupConfigResponse{Err: 0, Msg: string(encoded)})
 }
 
 // DocService
@@ -594,6 +619,7 @@ func (s *Service) ListDocs(ctx context.Context, req *pb.ListDocsRequest) (*pb.Li
 			Id: d.ID,
 			Content: &pb.Content{
 				Title:  d.Content.Title,
+				Rich:   d.Content.Rich,
 				Scales: firstNonEmptyBytes(d.Content.Scales, d.Content.Rich),
 				Level:  levelBytes(d.Content.Level, d.LegacyLevel),
 			},
@@ -616,8 +642,17 @@ func (s *Service) CreateDoc(ctx context.Context, req *pb.CreateDocRequest) (*pb.
 		return &pb.CreateDocResponse{Err: 1, Msg: "unauthenticated"}, nil
 	}
 	r := db.RequestDocPost{}
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		if values := md.Get("document-create-id"); len(values) > 0 {
+			if len(values) != 1 || values[0] == "" {
+				return &pb.CreateDocResponse{Err: 1, Msg: "invalid document creation id"}, nil
+			}
+			r.CreationID = values[0]
+		}
+	}
 	r.Data.Content = m.DocContent{
 		Title:  req.GetContent().GetTitle(),
+		Rich:   req.GetContent().GetRich(),
 		Scales: req.GetContent().GetScales(),
 		Level:  req.GetContent().GetLevel(),
 	}
@@ -647,6 +682,8 @@ func (s *Service) UpdateDoc(ctx context.Context, req *pb.UpdateDocRequest) (*pb.
 	}
 
 	r := db.RequestDocPut{}
+	r.UserID = uoid
+	r.EncryptedKey = req.GetEncryptedKey()
 	if req.Content != nil {
 		c := m.DocContent{}
 		if req.GetContent().Title != nil {
@@ -667,7 +704,7 @@ func (s *Service) UpdateDoc(ctx context.Context, req *pb.UpdateDocRequest) (*pb.
 		t := fmt.Sprintf("%d", req.GetCreateAt())
 		r.Doc.CreateAt = &t
 	}
-	upd := time.Now().Format("2006-01-02 15:04:05")
+	upd := fmt.Sprintf("%d", time.Now().Unix())
 	r.Doc.UpdateAt = &upd
 
 	if req.Config != nil {
@@ -679,9 +716,6 @@ func (s *Service) UpdateDoc(ctx context.Context, req *pb.UpdateDocRequest) (*pb.
 
 	if err := db.DocPut(req.GetGroupId(), req.GetDocId(), &r); err != nil {
 		return &pb.BasicResponse{Err: 1, Msg: err.Error()}, nil
-	}
-	if len(req.GetEncryptedKey()) > 0 {
-		_ = db.PermissionUpsert(uoid, req.GetDocId(), db.ResourceTypeDoc, db.RoleOwner, req.GetEncryptedKey())
 	}
 	return &pb.BasicResponse{Err: 0, Msg: "ok"}, nil
 }
@@ -756,6 +790,16 @@ func (s *Service) DeleteImage(ctx context.Context, req *pb.DeleteImageRequest) (
 }
 
 // FileService
+func uploadObjectPath(ownerID, themeID, groupID, docID, filename string) string {
+	filename = filepath.Base(filename)
+	if filename == "." || filename == "/" || filename == "" {
+		filename = "image.bin"
+	}
+	// Each envelope belongs to immutable ciphertext. Reusing a displayed
+	// filename must never overwrite the bytes referenced by an older file ID.
+	return path.Join(ownerID, themeID, groupID, docID, uuid.NewString()+"-"+filename)
+}
+
 func (s *Service) PresignUploadFile(ctx context.Context, req *pb.PresignUploadFileRequest) (*pb.PresignUploadFileResponse, error) {
 	uid := getUID(ctx)
 	uoid := getUOID(ctx)
@@ -781,14 +825,7 @@ func (s *Service) PresignUploadFile(ctx context.Context, req *pb.PresignUploadFi
 		}
 	}
 
-	filename := req.GetFilename()
-	if filename == "" {
-		filename = fmt.Sprintf("%s.bin", uuid.NewString())
-	} else {
-		filename = filepath.Base(filename)
-	}
-
-	objectPath := path.Join(uid, req.GetThemeId(), req.GetGroupId(), req.GetDocId(), filename)
+	objectPath := uploadObjectPath(uoid, req.GetThemeId(), req.GetGroupId(), req.GetDocId(), req.GetFilename())
 
 	expires := time.Duration(req.GetExpiresInSec()) * time.Second
 	url, expAt, err := minioSvc.GetClient().PresignPut(ctx, objectPath, req.GetMime(), expires)
@@ -797,7 +834,7 @@ func (s *Service) PresignUploadFile(ctx context.Context, req *pb.PresignUploadFi
 	}
 
 	meta := &db.FileMeta{
-		UID:               uid,
+		UID:               uoid,
 		ThemeID:           req.GetThemeId(),
 		GroupID:           req.GetGroupId(),
 		DocID:             req.GetDocId(),
@@ -839,7 +876,7 @@ func (s *Service) PresignDownloadFile(ctx context.Context, req *pb.PresignDownlo
 		return &pb.PresignDownloadFileResponse{Err: 1, Msg: err.Error()}, nil
 	}
 
-	if meta.UID != uid {
+	if meta.UID != uoid {
 		// Check doc permission for non-owner
 		if _, err := db.PermissionGet(uoid, db.ResourceTypeDoc, meta.DocID); err != nil {
 			return &pb.PresignDownloadFileResponse{Err: 403, Msg: "permission denied"}, nil
@@ -884,7 +921,7 @@ func (s *Service) DeleteFile(ctx context.Context, req *pb.DeleteFileRequest) (*p
 		}
 		return &pb.BasicResponse{Err: 1, Msg: err.Error()}, nil
 	}
-	if meta.UID != uid {
+	if meta.UID != uoid {
 		if _, err := db.PermissionGet(uoid, db.ResourceTypeDoc, meta.DocID); err != nil {
 			return &pb.BasicResponse{Err: 403, Msg: "permission denied"}, nil
 		}
@@ -1003,9 +1040,21 @@ func (s *Service) DownloadJobFile(ctx context.Context, req *pb.DownloadBackgroun
 	if filePath == "" {
 		return &pb.DownloadBackgroundJobFileResponse{Err: 404, Msg: "文件未找到"}, nil
 	}
-	data, err := os.ReadFile(filePath)
+	file, err := os.Open(filePath)
 	if err != nil {
-		return &pb.DownloadBackgroundJobFileResponse{Err: 404, Msg: err.Error()}, nil
+		return &pb.DownloadBackgroundJobFileResponse{Err: 404, Msg: "备份文件不可用"}, nil
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > db.BackupMaxBytes {
+		return &pb.DownloadBackgroundJobFileResponse{Err: 413, Msg: "备份文件无效或超过 256 MiB"}, nil
+	}
+	data, err := io.ReadAll(io.LimitReader(file, db.BackupMaxBytes+1))
+	if err != nil {
+		return &pb.DownloadBackgroundJobFileResponse{Err: 404, Msg: "备份文件无法读取，请重新导出"}, nil
+	}
+	if len(data) > db.BackupMaxBytes {
+		return &pb.DownloadBackgroundJobFileResponse{Err: 413, Msg: "备份文件超过 256 MiB"}, nil
 	}
 	return &pb.DownloadBackgroundJobFileResponse{Err: 0, Msg: "ok", Data: data, Filename: filepath.Base(filePath)}, nil
 }

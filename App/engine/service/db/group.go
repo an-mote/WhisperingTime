@@ -2,21 +2,16 @@ package db
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
-	log "github.com/tengfei-xy/go-log"
 	"gorm.io/gorm"
 
 	ml "github.com/acer-red/whisperingtime/engine/model"
 	minioSvc "github.com/acer-red/whisperingtime/engine/service/minio"
-	"github.com/acer-red/whisperingtime/engine/util"
 )
 
 // GroupModel is the gorm model for groups.
@@ -371,6 +366,10 @@ func GroupDeleteOne(groupID string) error {
 
 // RefreshGroupUpdateAt bumps updateAt and optionally clears buffer state.
 func RefreshGroupUpdateAt(groupID string, clearBuffer bool) error {
+	return refreshGroupUpdateAt(DB, groupID, clearBuffer)
+}
+
+func refreshGroupUpdateAt(tx *gorm.DB, groupID string, clearBuffer bool) error {
 	gidUUID, err := uuid.Parse(groupID)
 	if err != nil {
 		return err
@@ -380,18 +379,26 @@ func RefreshGroupUpdateAt(groupID string, clearBuffer bool) error {
 	}
 	if clearBuffer {
 		var g GroupModel
-		if err := DB.Select("over_at").Where("id = ?", gidUUID).First(&g).Error; err == nil {
-			if g.OverAt != nil && g.OverAt.After(time.Now()) {
-				updates["over_at"] = nil
-			}
+		if err := tx.Select("over_at").Where("id = ?", gidUUID).First(&g).Error; err != nil {
+			return err
+		}
+		if g.OverAt != nil && g.OverAt.After(time.Now()) {
+			updates["over_at"] = nil
 		}
 	}
-	return DB.Model(&GroupModel{}).Where("id = ?", gidUUID).Updates(updates).Error
+	result := tx.Model(&GroupModel{}).Where("id = ?", gidUUID).Updates(updates)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
 // ExportAllThemesConfig exports all themes/groups/docs for a user to a zip.
 func ExportAllThemesConfig(uid string) (string, error) {
-	bgjID, taskID, err := createBGJob(uid, JobTypeExportAllConfig, JobPriority0, "导出全部主题配置")
+	bgjID, taskID, err := createBGJob(uid, JobTypeExportAllConfig, JobPriority0, "导出完整备份")
 	if err != nil {
 		return "", err
 	}
@@ -401,156 +408,36 @@ func ExportAllThemesConfig(uid string) (string, error) {
 	return taskID, nil
 }
 
-type themeExport struct {
-	Tid    string            `json:"tid"`
-	Name   []byte            `json:"name"`
-	Groups []ml.GroupAndDocs `json:"groups"`
-}
-
-func loadAllThemesWithGroups(uid string) ([]themeExport, []string, error) {
-	var themes []ThemeModel
-	uidUUID, err := uuid.Parse(uid)
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := DB.Preload("Groups.Docs").Where("uid = ?", uidUUID).Find(&themes).Error; err != nil {
-		return nil, nil, err
-	}
-
-	var exportThemes []themeExport
-	var allDocIDs []string
-
-	for _, t := range themes {
-		var groups []ml.GroupAndDocs
-		for _, g := range t.Groups {
-			var docs []ml.Doc
-			for _, d := range g.Docs {
-				docs = append(docs, ml.Doc{
-					ID: d.ID.String(),
-					Content: ml.DocContent{
-						Title:  d.Title,
-						Rich:   d.Rich,
-						Scales: d.Scales,
-						Level:  d.Level,
-					},
-					CreateAt: d.CreatedAt,
-					UpdateAt: d.UpdatedAt,
-				})
-				allDocIDs = append(allDocIDs, d.ID.String())
-			}
-
-			var overAt string
-			if g.OverAt != nil {
-				overAt = g.OverAt.Format("2006-01-02 15:04:05")
-			}
-
-			groups = append(groups, ml.GroupAndDocs{
-				GID:      g.ID.String(),
-				Name:     g.Name,
-				Docs:     docs,
-				CreateAt: g.CreatedAt.Format("2006-01-02 15:04:05"),
-				UpdateAt: g.UpdatedAt.Format("2006-01-02 15:04:05"),
-				OverAt:   overAt,
-				Config:   DefaultGroupConfig(g.LevelsStr, g.ViewType, g.SortType, g.AutoFreezeDays),
-			})
-		}
-		exportThemes = append(exportThemes, themeExport{
-			Tid:    t.ID.String(),
-			Name:   t.Name,
-			Groups: groups,
-		})
-	}
-	return exportThemes, allDocIDs, nil
-}
-
+// A completed export job always denotes one validated, complete archive.
 func continueExportAllThemesConfig(jobID string, uid string) {
-	SetJobRunning(jobID)
-
-	themes, docIDs, err := loadAllThemesWithGroups(uid)
+	if err := SetJobRunning(jobID); err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	data, err := ExportBackup(ctx, DB, uid, minioSvc.GetClient())
 	if err != nil {
-		SetJobError(jobID, JobError{Code: 1, Message: err.Error()})
+		SetJobError(jobID, JobError{Code: 1, Message: BackupErrorMessage(err)})
 		return
 	}
-
-	if len(themes) == 0 {
-		err = fmt.Errorf("没有可导出的主题")
-		SetJobError(jobID, JobError{Code: 1, Message: err.Error()})
-		return
-	}
-
-	base := os.TempDir()
-	workdir := filepath.Join(base, "whispering_export_"+uuid.NewString())
-	if err := os.MkdirAll(workdir, 0755); err != nil {
-		SetJobError(jobID, JobError{Code: 1, Message: err.Error()})
-		return
-	}
-	defer os.RemoveAll(workdir)
-
-	configFilename := filepath.Join(workdir, "config.json")
-
-	if len(docIDs) > 0 {
-		if err := exportImagesForDocs(docIDs, workdir); err != nil {
-			log.Errorf("Failed to export images: %v", err)
-		}
-	}
-
-	data, err := json.Marshal(&themes)
+	output, err := os.CreateTemp(os.TempDir(), "WhisperingTime-Backup-*.zip")
 	if err != nil {
-		SetJobError(jobID, JobError{Code: 1, Message: err.Error()})
+		SetJobError(jobID, JobError{Code: 1, Message: BackupErrorMessage(err)})
 		return
 	}
-
-	if err := os.WriteFile(configFilename, data, 0644); err != nil {
-		SetJobError(jobID, JobError{Code: 1, Message: err.Error()})
+	filename := output.Name()
+	if _, err = output.Write(data); err != nil {
+		output.Close()
+		os.Remove(filename)
+		SetJobError(jobID, JobError{Code: 1, Message: BackupErrorMessage(err)})
 		return
 	}
-
-	outZipFilename := fmt.Sprintf("AllThemesConfig-%s.zip", util.YYYYMMDDhhmmss())
-	outZipPath := filepath.Join(base, outZipFilename)
-
-	if err := util.ZipDirectory(workdir, outZipPath); err != nil {
-		SetJobError(jobID, JobError{Code: 1, Message: err.Error()})
+	if err = output.Close(); err != nil {
+		os.Remove(filename)
+		SetJobError(jobID, JobError{Code: 1, Message: BackupErrorMessage(err)})
 		return
 	}
-
-	SetJobCompleted(jobID, map[string]string{"filename": outZipPath})
-	log.Infof("后台任务完成 %s, file: %s", jobID, outZipPath)
-}
-
-func exportImagesForDocs(docIDs []string, workdir string) error {
-	if len(docIDs) == 0 {
-		return nil
+	if err = SetJobCompleted(jobID, map[string]string{"filename": filename}); err != nil {
+		os.Remove(filename)
 	}
-
-	var metas []FileMetaModel
-	if err := DB.Where("did IN ?", docIDs).Find(&metas).Error; err != nil {
-		return err
-	}
-
-	if len(metas) == 0 {
-		return nil
-	}
-
-	imagesDir := filepath.Join(workdir, "images")
-	if err := os.MkdirAll(imagesDir, 0755); err != nil {
-		return err
-	}
-
-	minioClient := minioSvc.GetClient()
-	ctx := context.Background()
-
-	for _, fm := range metas {
-		if fm.ObjectPath == "" {
-			continue
-		}
-
-		fileName := filepath.Base(fm.ObjectPath)
-		destPath := filepath.Join(imagesDir, fileName)
-
-		if err := minioClient.DownloadObject(ctx, fm.ObjectPath, destPath); err != nil {
-			log.Errorf("Download failed for %s: %v", fm.ObjectPath, err)
-			continue
-		}
-	}
-	return nil
 }

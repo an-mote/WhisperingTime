@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
@@ -45,6 +46,12 @@ type Permission struct {
 
 // PermissionUpsert stores or updates a permission record for the given user and resource.
 func PermissionUpsert(userID string, resourceID, resourceType, role string, encryptedKey []byte) error {
+	return permissionUpsert(DB, userID, resourceID, resourceType, role, encryptedKey)
+}
+
+// permissionUpsert uses the supplied connection so a resource and its envelope
+// can be committed (or rolled back) together.
+func permissionUpsert(tx *gorm.DB, userID string, resourceID, resourceType, role string, encryptedKey []byte) error {
 	if userID == "" {
 		return errors.New("missing user id")
 	}
@@ -57,29 +64,15 @@ func PermissionUpsert(userID string, resourceID, resourceType, role string, encr
 		return err
 	}
 
-	var perm PermissionModel
-
-	err = DB.Where("uid = ? AND resource_id = ? AND resource_type = ?", uidUUID, resUUID, resourceType).First(&perm).Error
-
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		newPerm := PermissionModel{
-			UID:          uidUUID,
-			ResourceID:   resUUID,
-			ResourceType: resourceType,
-			Role:         role,
-			EncryptedKey: encryptedKey,
-			CreatedAt:    time.Now(),
-			UpdatedAt:    time.Now(),
-		}
-		return DB.Create(&newPerm).Error
-	} else if err != nil {
-		return err
+	perm := PermissionModel{
+		UID: uidUUID, ResourceID: resUUID, ResourceType: resourceType,
+		Role: role, EncryptedKey: encryptedKey,
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
 	}
-
-	perm.Role = role
-	perm.EncryptedKey = encryptedKey
-	perm.UpdatedAt = time.Now()
-	return DB.Save(&perm).Error
+	return tx.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "uid"}, {Name: "resource_type"}, {Name: "resource_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{"role", "encrypted_key", "updated_at"}),
+	}).Create(&perm).Error
 }
 
 func PermissionGet(userID string, resourceType, resourceID string) (Permission, error) {

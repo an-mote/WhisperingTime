@@ -20,31 +20,11 @@ migrate_working_dir/
 
 .vscode/
 
-# Flutter/Dart/Pub related
-**/doc/api/
-**/ios/Flutter/.last_build_id
-.dart_tool/
-.flutter-plugins
-.flutter-plugins-dependencies
-.pub-cache/
-.pub/
+# Xcode 本机状态和构建产物
+DerivedData/
+*.xcuserstate
+xcuserdata/
 /App/WhisperingTime/build/
-/App/WhisperingTime/ios/build/
-
-# Symbolication related
-app.*.symbols
-
-# Obfuscation related
-app.*.map.json
-
-# Android Studio will place build artifacts here
-/App/WhisperingTime/android/app/debug
-/App/WhisperingTime/android/app/profile
-/App/WhisperingTime/android/app/release
-
-# test folder
-/App/WhisperingTime/test
-todo
 
 # 本机代码图谱与研发产物
 /.codebase-memory/

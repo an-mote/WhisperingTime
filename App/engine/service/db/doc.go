@@ -1,11 +1,15 @@
 package db
 
 import (
+	"bytes"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/tengfei-xy/go-log"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	m "github.com/acer-red/whisperingtime/engine/model"
 	"github.com/acer-red/whisperingtime/engine/util"
@@ -31,7 +35,8 @@ type DocModel struct {
 func (DocModel) TableName() string { return "doc" }
 
 type RequestDocPost struct {
-	Data struct {
+	CreationID string `json:"-"`
+	Data       struct {
 		Content      m.DocContent `json:"content"`
 		CreateAt     string       `json:"createAt"`
 		Config       *m.DocConfig `json:"config"`
@@ -40,7 +45,9 @@ type RequestDocPost struct {
 }
 
 type RequestDocPut struct {
-	Doc struct {
+	UserID       string `json:"-"`
+	EncryptedKey []byte `json:"-"`
+	Doc          struct {
 		Content  *m.DocContent `json:"content,omitempty" bson:"content"`
 		CreateAt *string       `json:"createAt,omitempty"`
 		UpdateAt *string       `json:"updateAt,omitempty"`
@@ -67,7 +74,7 @@ func DocsGet(groupID string, f DocFilter) ([]m.Doc, error) {
 	if f.Year != 0 && f.Month != 0 {
 		startDate := time.Date(f.Year, time.Month(f.Month), 1, 0, 0, 0, 0, time.Local)
 		endDate := time.Date(f.Year, time.Month(f.Month+1), 1, 0, 0, 0, 0, time.Local)
-		query = query.Where("created_at >= ? AND created_at < ?", startDate, endDate)
+		query = query.Where("create_at >= ? AND create_at < ?", startDate, endDate)
 	}
 
 	if err := query.Find(&docs).Error; err != nil {
@@ -98,7 +105,9 @@ func DocsGet(groupID string, f DocFilter) ([]m.Doc, error) {
 	return results, nil
 }
 func DocPost(uid string, groupID string, req *RequestDocPost) (string, error) {
-	var didUUID uuid.UUID
+	if req == nil || len(req.Data.EncryptedKey) == 0 {
+		return "", errors.New("missing document encryption key")
+	}
 	uidUUID, err := uuid.Parse(uid)
 	if err != nil {
 		return "", err
@@ -107,8 +116,16 @@ func DocPost(uid string, groupID string, req *RequestDocPost) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	var creationUUID uuid.UUID
+	if req.CreationID != "" {
+		creationUUID, err = uuid.Parse(req.CreationID)
+		if err != nil || creationUUID == uuid.Nil {
+			return "", errors.New("invalid document creation id")
+		}
+	}
 
 	newDoc := DocModel{
+		ID:           creationUUID,
 		UID:          uidUUID,
 		GID:          gidUUID,
 		Title:        req.Data.Content.Title,
@@ -125,67 +142,134 @@ func DocPost(uid string, groupID string, req *RequestDocPost) (string, error) {
 		newDoc.DisplayPriority = req.Data.Config.DisplayPriority
 	}
 
-	if err := DB.Create(&newDoc).Error; err != nil {
+	err = DB.Transaction(func(tx *gorm.DB) error {
+		var group GroupModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND uid = ?", gidUUID, uidUUID).First(&group).Error; err != nil {
+			return err
+		}
+		if creationUUID != uuid.Nil {
+			var existing DocModel
+			err := tx.Unscoped().Where("id = ?", creationUUID).First(&existing).Error
+			if err == nil {
+				if existing.UID != uidUUID || existing.GID != gidUUID || existing.DeletedAt.Valid {
+					return errors.New("document creation id unavailable")
+				}
+				// A response may have been lost after a committed create. The
+				// original snapshot wins; newer edits must use UpdateDoc.
+				newDoc.ID = existing.ID
+				return nil
+			}
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+		}
+		if err := tx.Create(&newDoc).Error; err != nil {
+			return err
+		}
+		if err := permissionUpsert(tx, uid, newDoc.ID.String(), ResourceTypeDoc, RoleOwner, req.Data.EncryptedKey); err != nil {
+			return err
+		}
+		return refreshGroupUpdateAt(tx, groupID, true)
+	})
+	if err != nil {
 		return "", err
 	}
-	didUUID = newDoc.ID
-	did := didUUID.String()
-
-	if err := PermissionUpsert(uid, did, ResourceTypeDoc, RoleOwner, req.Data.EncryptedKey); err != nil {
-		return "", err
-	}
-
-	if err := RefreshGroupUpdateAt(groupID, true); err != nil {
-		log.Errorf("failed to refresh group updateAt: %v", err)
-		// Non-critical, continue
-	}
-
-	return did, nil
+	return newDoc.ID.String(), nil
 }
 
 func DocPut(groupID string, docID string, req *RequestDocPut) error {
-	m := make(map[string]interface{})
+	if req == nil || req.UserID == "" {
+		return errors.New("missing user id")
+	}
+	uidUUID, err := uuid.Parse(req.UserID)
+	if err != nil {
+		return err
+	}
+	didUUID, err := uuid.Parse(docID)
+	if err != nil {
+		return err
+	}
+	gidUUID, err := uuid.Parse(groupID)
+	if err != nil {
+		return err
+	}
+	updates := make(map[string]interface{})
 
 	if req.Doc.Content != nil {
 		if req.Doc.Content.Title != nil {
-			m["title"] = req.Doc.Content.Title
+			updates["title"] = req.Doc.Content.Title
 		}
 		if req.Doc.Content.Rich != nil {
-			m["rich"] = req.Doc.Content.Rich // 假设数据库字段名
+			updates["rich"] = req.Doc.Content.Rich
 		}
 		if req.Doc.Content.Scales != nil {
-			m["scales"] = req.Doc.Content.Scales
+			updates["scales"] = req.Doc.Content.Scales
 		}
-		// ... 其他字段
+		if req.Doc.Content.Level != nil {
+			updates["level"] = req.Doc.Content.Level
+		}
+	}
+	if req.Doc.CreateAt != nil {
+		updates["create_at"] = util.StringtoTime(*req.Doc.CreateAt)
 	}
 
 	if req.Doc.UpdateAt != nil {
-		m["update_at"] = util.StringtoTime(*req.Doc.UpdateAt)
+		updates["update_at"] = util.StringtoTime(*req.Doc.UpdateAt)
 	}
 
 	if req.Doc.Config != nil {
-		m["is_show_tool"] = req.Doc.Config.IsShowTool
-		m["display_priority"] = req.Doc.Config.DisplayPriority
+		updates["is_show_tool"] = req.Doc.Config.IsShowTool
+		updates["display_priority"] = req.Doc.Config.DisplayPriority
 	}
 
-	if len(m) > 0 {
-		didUUID, err := uuid.Parse(docID)
-		if err != nil {
+	return DB.Transaction(func(tx *gorm.DB) error {
+		// Lock the parent first, matching creation's lock order.
+		var group GroupModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND uid = ?", gidUUID, uidUUID).First(&group).Error; err != nil {
 			return err
 		}
-		gidUUID, err := uuid.Parse(groupID)
-		if err != nil {
+		var doc DocModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND gid = ? AND uid = ?", didUUID, gidUUID, uidUUID).First(&doc).Error; err != nil {
 			return err
 		}
-		if err := DB.Model(&DocModel{}).Where("id = ? AND gid = ?", didUUID, gidUUID).Updates(m).Error; err != nil {
+		var perm PermissionModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("uid = ? AND resource_id = ? AND resource_type = ? AND role = ?", uidUUID, didUUID, ResourceTypeDoc, RoleOwner).First(&perm).Error; err != nil {
+			return fmt.Errorf("document owner permission unavailable; cannot safely update: %w", err)
+		}
+		if len(perm.EncryptedKey) == 0 {
+			return errors.New("missing document encryption key; cannot safely update")
+		}
+		key := perm.EncryptedKey
+		if len(req.EncryptedKey) > 0 {
+			// A partial rewrite must keep the data key used by untouched fields.
+			// Envelopes are opaque to the server, so compare the original bytes.
+			if !bytes.Equal(req.EncryptedKey, perm.EncryptedKey) && !replacesAllEncryptedDocFields(req.Doc.Content, doc) {
+				return errors.New("document encryption key changed; reload before updating")
+			}
+			key = req.EncryptedKey
+		}
+		updates["encrypted_key"] = key
+		result := tx.Model(&DocModel{}).Where("id = ? AND gid = ? AND uid = ?", didUUID, gidUUID, uidUUID).Updates(updates)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return gorm.ErrRecordNotFound
+		}
+		if err := permissionUpsert(tx, req.UserID, docID, ResourceTypeDoc, RoleOwner, key); err != nil {
 			return err
 		}
-		return RefreshGroupUpdateAt(groupID, true)
-	}
-	return nil
+		return refreshGroupUpdateAt(tx, groupID, true)
+	})
 }
 
-// ... 提取 Bytes 的辅助函数不再需要，因为 GORM 会自动映射 []byte 到 bytea
+func replacesAllEncryptedDocFields(content *m.DocContent, current DocModel) bool {
+	return content != nil &&
+		(len(current.Title) == 0 || content.Title != nil) &&
+		(len(current.Rich) == 0 || content.Rich != nil) &&
+		(len(current.Scales) == 0 || content.Scales != nil) &&
+		(len(current.Level) == 0 || content.Level != nil)
+}
 
 func DocDelete(groupID string, docID string) error {
 	didUUID, err := uuid.Parse(docID)

@@ -5,6 +5,7 @@ import (
 	"net"
 
 	"github.com/acer-red/whisperingtime/engine/pb"
+	"github.com/acer-red/whisperingtime/engine/service/db"
 	log "github.com/tengfei-xy/go-log"
 	"google.golang.org/grpc"
 )
@@ -25,6 +26,7 @@ func Init(cfg Config) error {
 	}
 
 	s := grpc.NewServer(
+		grpc.MaxSendMsgSize(db.BackupMaxBytes+(1<<20)),
 		grpc.UnaryInterceptor(unaryAuthInterceptor),
 		grpc.StreamInterceptor(streamAuthInterceptor),
 	)

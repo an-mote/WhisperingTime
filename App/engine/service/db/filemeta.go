@@ -68,8 +68,8 @@ func FileMetaCreate(ctx context.Context, meta *FileMeta) (string, error) {
 		Mime:              meta.Mime,
 		Size:              meta.Size,
 		EncryptedKey:      meta.EncryptedKey,
-		IV:                meta.IV,
-		EncryptedMetadata: meta.EncryptedMetadata,
+		IV:                nonNil(meta.IV),
+		EncryptedMetadata: nonNil(meta.EncryptedMetadata),
 		CreatedAt:         time.Now(),
 		UpdatedAt:         time.Now(),
 	}
