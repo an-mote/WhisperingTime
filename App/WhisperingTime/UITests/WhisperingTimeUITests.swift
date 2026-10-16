@@ -37,12 +37,9 @@ final class WhisperingTimeUITests: XCTestCase {
         return app
     }
 
-    /// Writes a UUID-scoped TMP fixture, using the production manifest's millisecond date encoding.
-    private func prepareTimelineOverflowLibrary() throws -> URL {
-        var repository = URL(fileURLWithPath: #filePath)
-        for _ in 0..<4 { repository.deleteLastPathComponent() }
-        let root = repository.appendingPathComponent("TMP/时间轴视觉修正/2026-10-16/界面测试夹具", isDirectory: true)
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    /// Builds the fixture in memory; xcresult retains its JSON without requiring Documents access.
+    private func prepareTimelineOverflowLibrary() throws -> (id: String, data: String) {
+        let fixtureID = UUID().uuidString
         let categoryIDs = (0..<3).map { _ in UUID().uuidString }
         let categories: [[String: Any]] = [
             ["id": categoryIDs[0], "name": "生活"],
@@ -71,10 +68,11 @@ final class WhisperingTimeUITests: XCTestCase {
         }
         let manifest: [String: Any] = ["version": 1, "categories": categories, "imprints": records]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        addTeardownBlock { try FileManager.default.removeItem(at: root) }
-        try data.write(to: root.appendingPathComponent("library.json"), options: .atomic)
-        return root
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "时间轴40篇夹具-\(fixtureID).json"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        return (id: fixtureID, data: data.base64EncodedString())
     }
 
     private func element(_ id: String, in app: XCUIApplication) -> XCUIElement {
@@ -146,12 +144,17 @@ final class WhisperingTimeUITests: XCTestCase {
             XCTAssertTrue(picker.waitForExistence(timeout: 5))
             waitFor(NSPredicate(format: "hittable == true"), on: picker)
             picker.click()
-            let choice = app.menuItems.matching(NSPredicate(format: "title == %@ OR label == %@", title, title)).firstMatch
-            let submenu = app.menuItems.matching(NSPredicate(format: "title == %@ OR label == %@", "展示方式", "展示方式")).firstMatch
-            if submenu.exists && submenu.isHittable && (!choice.exists || !choice.isHittable) { submenu.hover() }
-            XCTAssertTrue(choice.waitForExistence(timeout: 5))
-            waitFor(NSPredicate(format: "hittable == true"), on: choice)
+            func visibleMenuItem(_ name: String) -> XCUIElement? {
+                app.menuItems.matching(NSPredicate(format: "title == %@ OR label == %@", name, name))
+                    .allElementsBoundByIndex.first { $0.isHittable && !$0.frame.isEmpty }
+            }
+            // The app's Display menu repeats these names. A hidden command may report
+            // hittable while its frame is empty, invoke the mode, and leave the popup tracking.
+            if visibleMenuItem(title) == nil, let submenu = visibleMenuItem("展示方式") { submenu.hover() }
+            waitFor(NSPredicate { _, _ in visibleMenuItem(title) != nil }, on: app)
+            guard let choice = visibleMenuItem(title) else { return }
             choice.click()
+            waitFor(NSPredicate { _, _ in visibleMenuItem(title) == nil }, on: app)
         }
         XCTAssertTrue(element(canvas, in: app).waitForExistence(timeout: 5), "The \(title) view did not become visible")
     }
@@ -162,6 +165,16 @@ final class WhisperingTimeUITests: XCTestCase {
 
     private func imprintButtons(in app: XCUIApplication) -> XCUIElementQuery {
         app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "imprint-"))
+    }
+
+    private func sidebarScope(_ title: String, in sidebar: XCUIElement) -> XCUIElement {
+        let named = NSPredicate(format: "label BEGINSWITH %@ OR title == %@", title, title)
+        let row = sidebar.outlineRows.matching(named).firstMatch
+        if row.exists { return row }
+        let rowWithText = sidebar.outlineRows.containing(.staticText, identifier: title).firstMatch
+        if rowWithText.exists { return rowWithText }
+        // Some native List versions expose a button within the row instead of a named row.
+        return sidebar.buttons.matching(named).firstMatch
     }
 
     private func timelineOffset(in app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) -> CGPoint {
@@ -186,6 +199,43 @@ final class WhisperingTimeUITests: XCTestCase {
         }
         XCTAssertFalse(earlier.isEnabled, "较早按钮应能到达时间轴起点")
         XCTAssertEqual(timelineOffset(in: app).x, 0, accuracy: 2)
+    }
+
+    private func dragTimelineThumb(to fraction: CGFloat, name: String, app: XCUIApplication) {
+        app.activate()
+        let scroller = element("timelineScroller", in: app)
+        let thumb = scroller.descendants(matching: .valueIndicator).firstMatch
+        XCTAssertTrue(thumb.waitForExistence(timeout: 5), "原生滚动条必须暴露实际滑块")
+        let trackFrame = scroller.frame
+        let thumbFrame = thumb.frame
+        XCTAssertGreaterThan(thumbFrame.width, 0)
+        XCTAssertGreaterThan(thumbFrame.height, 0)
+        XCTAssertTrue(trackFrame.contains(CGPoint(x: thumbFrame.midX, y: thumbFrame.midY)))
+        let targetX = trackFrame.minX + 1 + min(max(fraction, 0), 1) * max(0, trackFrame.width - 2)
+
+        func attach(_ phase: String) {
+            let note = XCTAttachment(string: """
+                phase=\(phase)
+                window.frame=\(app.windows.firstMatch.frame)
+                scroller.frame=\(scroller.frame)
+                scroller.value=\(String(describing: scroller.value))
+                scroller.enabled=\(scroller.isEnabled)
+                thumb.frame=\(thumb.frame)
+                viewport=\(String(describing: element("timelineCanvas", in: app).value))
+                drag.from=\(CGPoint(x: thumbFrame.midX, y: thumbFrame.midY))
+                drag.to=\(CGPoint(x: targetX, y: thumbFrame.midY))
+                """)
+            note.name = "时间轴滑块拖动-\(name)-\(phase)"
+            note.lifetime = .keepAlways
+            add(note)
+        }
+        attach("之前")
+        // Query the native value indicator again for every drag; never assume where its knob lies on the track.
+        let start = thumb.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        let destination = start.withOffset(CGVector(dx: targetX - thumbFrame.midX, dy: 0))
+        // AppKit controls need mouse events; press(forDuration:) synthesizes a touch path.
+        start.click(forDuration: 0.15, thenDragTo: destination)
+        attach("之后")
     }
 
     private func assertTimelineNavigator(in app: XCUIApplication, configuration: String) {
@@ -249,10 +299,9 @@ final class WhisperingTimeUITests: XCTestCase {
     }
 
     func testRootTimelineNativeScrollerAndCanvasStayInSync() throws {
-        let fixtureRoot = try prepareTimelineOverflowLibrary()
-        let fixtureData = try Data(contentsOf: fixtureRoot.appendingPathComponent("library.json")).base64EncodedString()
-        let app = launch(libraryID: fixtureRoot.lastPathComponent,
-                         arguments: ["--qa-window-size", "640x480", "--qa-library-data", fixtureData])
+        let fixture = try prepareTimelineOverflowLibrary()
+        let app = launch(libraryID: fixture.id,
+                         arguments: ["--qa-window-size", "640x480", "--qa-library-data", fixture.data])
         selectMode("时间轴", canvas: "timelineCanvas", app: app)
         moveTimelineToStart(in: app)
         let canvas = element("timelineCanvas", in: app)
@@ -264,9 +313,7 @@ final class WhisperingTimeUITests: XCTestCase {
         XCTAssertTrue(element("timelineLater", in: app).isEnabled)
         let start = timelineOffset(in: app)
         let initialValue = canvas.value as? String ?? ""
-        // Legacy NSScroller exposes a persistent track; at the start its knob covers this point.
-        scroller.coordinate(withNormalizedOffset: CGVector(dx: 0.04, dy: 0.5))
-            .press(forDuration: 0.15, thenDragTo: scroller.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.5)))
+        dragTimelineThumb(to: 1, name: "起点到终点", app: app)
         waitFor(NSPredicate(format: "value != %@", initialValue), on: canvas)
         let end = timelineOffset(in: app)
         XCTAssertGreaterThan(end.x, start.x + 20)
@@ -276,15 +323,14 @@ final class WhisperingTimeUITests: XCTestCase {
         XCTAssertFalse(element("editImprint", in: app).exists)
 
         let atEndValue = canvas.value as? String ?? ""
-        scroller.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.5))
-            .press(forDuration: 0.15, thenDragTo: scroller.coordinate(withNormalizedOffset: CGVector(dx: 0.04, dy: 0.5)))
+        dragTimelineThumb(to: 0, name: "终点到起点", app: app)
         waitFor(NSPredicate(format: "value != %@", atEndValue), on: canvas)
         waitFor(NSPredicate(format: "enabled == false"), on: element("timelineEarlier", in: app))
         XCTAssertEqual(timelineOffset(in: app).x, 0, accuracy: 2)
+        XCTAssertEqual(timelineOffset(in: app).y, end.y, accuracy: 2, "拖回起点须保留纵向位置")
 
         let atStartValue = canvas.value as? String ?? ""
-        scroller.coordinate(withNormalizedOffset: CGVector(dx: 0.04, dy: 0.5))
-            .press(forDuration: 0.15, thenDragTo: scroller.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)))
+        dragTimelineThumb(to: 0.5, name: "起点到中间", app: app)
         waitFor(NSPredicate(format: "value != %@", atStartValue), on: canvas)
         let middle = timelineOffset(in: app)
         XCTAssertGreaterThan(middle.x, 0)
@@ -303,10 +349,9 @@ final class WhisperingTimeUITests: XCTestCase {
     }
 
     func testRootTimelineRestoresViewportAndLocatesSelectionFromCardsAndCalendar() throws {
-        let fixtureRoot = try prepareTimelineOverflowLibrary()
-        let fixtureData = try Data(contentsOf: fixtureRoot.appendingPathComponent("library.json")).base64EncodedString()
-        let app = launch(libraryID: fixtureRoot.lastPathComponent,
-                         arguments: ["--qa-window-size", "640x480", "--qa-library-data", fixtureData])
+        let fixture = try prepareTimelineOverflowLibrary()
+        let app = launch(libraryID: fixture.id,
+                         arguments: ["--qa-window-size", "640x480", "--qa-library-data", fixture.data])
         let card = firstImprint(in: app)
         let selectedID = card.identifier
         card.click()
@@ -362,10 +407,9 @@ final class WhisperingTimeUITests: XCTestCase {
 
     func testRootTimelineLocatesRetainedSelectionWhenReturningFromExcludedCategory() throws {
         // The regular window has room to reveal the native sidebar for filter changes.
-        let fixtureRoot = try prepareTimelineOverflowLibrary()
-        let fixtureData = try Data(contentsOf: fixtureRoot.appendingPathComponent("library.json")).base64EncodedString()
-        let app = launch(libraryID: fixtureRoot.lastPathComponent,
-                         arguments: ["--qa-window-size", "1000x760", "--qa-library-data", fixtureData])
+        let fixture = try prepareTimelineOverflowLibrary()
+        let app = launch(libraryID: fixture.id,
+                         arguments: ["--qa-window-size", "1000x760", "--qa-library-data", fixture.data])
         let newest = firstImprint(in: app)
         let selectedID = newest.identifier
         newest.click()
@@ -378,10 +422,9 @@ final class WhisperingTimeUITests: XCTestCase {
         waitFor(NSPredicate(format: "selected == true AND hittable == true"), on: initialSelection)
         XCTAssertEqual(imprintButtons(in: app).count, 40)
 
-        // A Button in the native sidebar List is exposed as a selectable row, without a button child.
-        let unclassified = app.windows.firstMatch.descendants(matching: .any)
-            .matching(NSPredicate(format: "label BEGINSWITH %@ OR title == %@", "未分类", "未分类")).firstMatch
-        if !unclassified.isHittable {
+        // Restrict scope controls to the native sidebar outline; canvas branch labels and review titles repeat these names.
+        let sidebar = app.windows.firstMatch.outlines.firstMatch
+        if !sidebar.isHittable {
             // The workspace initially presents detailOnly; use its native toggle before addressing sidebar rows.
             let sidebarToggle = app.windows.firstMatch.buttons.matching(NSPredicate(
                 format: "identifier CONTAINS[c] %@ OR label CONTAINS[c] %@ OR label CONTAINS %@ OR title CONTAINS[c] %@ OR title CONTAINS %@",
@@ -390,6 +433,9 @@ final class WhisperingTimeUITests: XCTestCase {
             waitFor(NSPredicate(format: "hittable == true"), on: sidebarToggle)
             sidebarToggle.click()
         }
+        XCTAssertTrue(sidebar.waitForExistence(timeout: 5))
+        waitFor(NSPredicate(format: "hittable == true"), on: sidebar)
+        let unclassified = sidebarScope("未分类", in: sidebar)
         XCTAssertTrue(unclassified.waitForExistence(timeout: 5))
         waitFor(NSPredicate(format: "hittable == true"), on: unclassified)
         unclassified.click()
@@ -400,8 +446,7 @@ final class WhisperingTimeUITests: XCTestCase {
         XCTAssertEqual(imprintButtons(in: app).count, 1)
         XCTAssertTrue(imprintButtons(in: app).allElementsBoundByIndex.allSatisfy { !$0.isSelected }, "范围外的选中项不应被替换成当前范围内容")
         XCTAssertFalse(element("editImprint", in: app).exists)
-        let all = app.windows.firstMatch.descendants(matching: .any)
-            .matching(NSPredicate(format: "label BEGINSWITH %@ OR title == %@", "全部印迹", "全部印迹")).firstMatch
+        let all = sidebarScope("全部印迹", in: sidebar)
         waitFor(NSPredicate(format: "hittable == true"), on: all)
         all.click()
 

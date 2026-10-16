@@ -196,15 +196,48 @@ def _javascript_test(script: str, arguments: Sequence[str]) -> bool:
     return bool(arguments) and ((playwright and arguments[0] == "test") or (cypress and arguments[0] == "run"))
 
 
+def _xcodebuild_test(arguments: Sequence[str]) -> bool:
+    # Actions may follow build options. A scheme/configuration named "test"
+    # is an option value, not evidence that tests are running.
+    value_options = {
+        "-project", "-workspace", "-scheme", "-target", "-configuration", "-sdk",
+        "-destination", "-destination-timeout", "-arch", "-toolchain", "-xcconfig",
+        "-jobs", "-derivedDataPath", "-resultBundlePath", "-resultStreamPath",
+        "-clonedSourcePackagesDirPath", "-xctestrun", "-testPlan", "-testLanguage",
+        "-testRegion", "-enableCodeCoverage", "-only-testing", "-skip-testing",
+        "-parallel-testing-enabled", "-parallel-testing-worker-count",
+        "-maximum-parallel-testing-workers",
+        "-maximum-concurrent-test-device-destinations",
+        "-maximum-concurrent-test-simulator-destinations",
+    }
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument in value_options:
+            index += 2
+            continue
+        if argument in {"test", "test-without-building"}:
+            return True
+        index += 1
+    return False
+
+
 def is_test_runner(process: Process) -> bool:
     if process.state.upper().startswith("Z"):
         return False
     name = process.name.lower()
     if name in {"xctest", "xctrunner", "flutter_tester", "pytest", "py.test"} or "uitests-runner" in name:
         return True
+    # Native UI test targets may be named Product-Runner rather than
+    # ProductUITests-Runner and need not receive an explicit -XCTest option.
+    runner_bundle = re.search(r"/([^/]+-Runner)\.app/Contents/MacOS/([^/]+)$", process.executable, re.IGNORECASE)
+    if runner_bundle and runner_bundle.group(1).lower() == runner_bundle.group(2).lower():
+        return True
     # A hosted XCTest bundle runs inside the application executable. The exact
     # leading XCTest option distinguishes that host from ordinary QA launches.
     arguments = _arguments_after_executable(process)
+    if name == "xcodebuild":
+        return _xcodebuild_test(arguments)
     if "-XCTest" in arguments and re.search(r"\.app/Contents/MacOS/[^/]+$", process.executable):
         return True
     if re.search(r"\.xctest/Contents/MacOS/[^/]+$", process.executable):

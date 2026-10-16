@@ -57,17 +57,58 @@ final class TimelineLayoutTests: XCTestCase {
         XCTAssertTrue(horizontal || vertical, file: file, line: line)
     }
 
-    /// Sample cubics into short edges, then reject every intersection or shared cable run between relationships.
-    /// A pair of forks may touch only at their shared real first-card source port.
+    private func hierarchyPath(_ layout: TimelineLayout, to branch: TimelineLayout.Branch) -> [TimelineLayout.Connection] {
+        layout.connections.filter { $0.relationshipIDs.contains(branch.id + "-fork") }
+    }
+
+    private func assertCompleteHierarchy(_ layout: TimelineLayout, file: StaticString = #filePath, line: UInt = #line) throws {
+        let expected = Set(layout.branches.filter { $0.parentID != nil }.map { $0.id + "-fork" })
+        let actual = Set(layout.connections.filter { $0.kind == .hierarchy }.flatMap(\.relationshipIDs))
+        XCTAssertEqual(actual, expected, "Every visible parent/child pair needs a continuous drawn path", file: file, line: line)
+        for branch in layout.branches where branch.parentID != nil {
+            let parent = try XCTUnwrap(layout.branches.first { $0.id == branch.parentID }, file: file, line: line)
+            let path = hierarchyPath(layout, to: branch)
+            let first = try XCTUnwrap(path.first, file: file, line: line)
+            let last = try XCTUnwrap(path.last, file: file, line: line)
+            if let id = parent.firstRecordID {
+                let source = try XCTUnwrap(layout.nodes.first { $0.id == id }, file: file, line: line)
+                assertCardBoundary(first.from, frame: source.frame, file: file, line: line)
+                XCTAssertEqual(first.sourceRecordID, id, file: file, line: line)
+            } else {
+                XCTAssertEqual(first.from, parent.junction, file: file, line: line)
+            }
+            if let id = branch.firstRecordID {
+                let target = try XCTUnwrap(layout.nodes.first { $0.id == id }, file: file, line: line)
+                assertCardBoundary(last.to, frame: target.frame, file: file, line: line)
+                XCTAssertEqual(last.targetRecordID, id, file: file, line: line)
+            } else {
+                XCTAssertEqual(last.to, branch.junction, file: file, line: line)
+            }
+            for (before, after) in zip(path, path.dropFirst()) {
+                XCTAssertEqual(before.to, after.from, "A parent/child branch must not have a gap", file: file, line: line)
+            }
+        }
+    }
+
+    /// Each connection is drawn once, even when several semantic paths use a shared trunk.
+    /// Separate physical segments may touch at declared route joins, structural forks or real card ports.
     private func assertNoCrossingRelationships(_ layout: TimelineLayout, file: StaticString = #filePath, line: UInt = #line) {
         struct Edge {
             let from: CGPoint
             let to: CGPoint
-            let relationship: String
+            let connection: TimelineLayout.Connection
         }
         func cross(_ a: CGPoint, _ b: CGPoint) -> CGFloat { a.x * b.y - a.y * b.x }
         func minus(_ a: CGPoint, _ b: CGPoint) -> CGPoint { CGPoint(x: a.x - b.x, y: a.y - b.y) }
         func same(_ a: CGPoint, _ b: CGPoint) -> Bool { hypot(a.x - b.x, a.y - b.y) < 0.001 }
+        func isCardPort(_ point: CGPoint) -> Bool {
+            layout.nodes.contains { node in
+                let rect = node.frame
+                return same(point, CGPoint(x: rect.minX, y: rect.midY)) || same(point, CGPoint(x: rect.maxX, y: rect.midY))
+                    || same(point, CGPoint(x: rect.midX, y: rect.minY)) || same(point, CGPoint(x: rect.midX, y: rect.maxY))
+            }
+        }
+        XCTAssertEqual(Set(layout.connections.map(\.id)).count, layout.connections.count, file: file, line: line)
         let edges = layout.connections.flatMap { connection -> [Edge] in
             let samples = (0...24).map { step -> CGPoint in
                 let t = CGFloat(step) / 24, u = 1 - t
@@ -76,10 +117,10 @@ final class TimelineLayoutTests: XCTestCase {
                     y: u * u * u * connection.from.y + 3 * u * u * t * connection.control1.y + 3 * u * t * t * connection.control2.y + t * t * t * connection.to.y
                 )
             }
-            return zip(samples, samples.dropFirst()).map { Edge(from: $0.0, to: $0.1, relationship: connection.relationshipID) }
+            return zip(samples, samples.dropFirst()).map { Edge(from: $0.0, to: $0.1, connection: connection) }
         }
         for (index, edge) in edges.enumerated() {
-            for other in edges.dropFirst(index + 1) where edge.relationship != other.relationship {
+            for other in edges.dropFirst(index + 1) where edge.connection.id != other.connection.id {
                 guard max(edge.from.x, edge.to.x) + 0.001 >= min(other.from.x, other.to.x),
                       max(other.from.x, other.to.x) + 0.001 >= min(edge.from.x, edge.to.x),
                       max(edge.from.y, edge.to.y) + 0.001 >= min(other.from.y, other.to.y),
@@ -92,27 +133,20 @@ final class TimelineLayoutTests: XCTestCase {
                     let first = [useX ? edge.from.x : edge.from.y, useX ? edge.to.x : edge.to.y].sorted()
                     let second = [useX ? other.from.x : other.from.y, useX ? other.to.x : other.to.y].sorted()
                     XCTAssertLessThanOrEqual(min(first[1], second[1]) - max(first[0], second[0]), 0.001,
-                                             "Shared cable: \(edge.relationship) / \(other.relationship)", file: file, line: line)
+                                             "A shared trunk must be drawn once: \(edge.connection.id) / \(other.connection.id)", file: file, line: line)
                     continue
                 }
                 let t = cross(delta, b) / denominator, u = cross(delta, a) / denominator
                 guard t >= -0.000_001 && t <= 1.000_001 && u >= -0.000_001 && u <= 1.000_001 else { continue }
                 let point = CGPoint(x: edge.from.x + t * a.x, y: edge.from.y + t * a.y)
-                let commonEndpoint = [edge.from, edge.to].contains { p in
-                    same(p, point) && [other.from, other.to].contains { same($0, point) }
-                }
-                // Only endpoints on the same real first card may be shared, never a remote route join.
-                let route = layout.connections.filter { $0.relationshipID == edge.relationship }
-                let otherRoute = layout.connections.filter { $0.relationshipID == other.relationship }
-                let ports: [(UUID?, CGPoint)] = [(route.first!.sourceRecordID, route.first!.from),
-                                                (route.last!.targetRecordID, route.last!.to)]
-                let otherPorts: [(UUID?, CGPoint)] = [(otherRoute.first!.sourceRecordID, otherRoute.first!.from),
-                                                     (otherRoute.last!.targetRecordID, otherRoute.last!.to)]
-                let sharedCardPort = ports.contains { id, port in
-                    id != nil && same(port, point) && otherPorts.contains { $0.0 == id && same($0.1, point) }
-                }
-                XCTAssertTrue(commonEndpoint && sharedCardPort,
-                              "Crossed cables: \(edge.relationship) / \(other.relationship) at \(point)", file: file, line: line)
+                let atDeclaredEndpoints = [edge.connection.from, edge.connection.to].contains { same($0, point) }
+                    && [other.connection.from, other.connection.to].contains { same($0, point) }
+                let samePath = !Set(edge.connection.relationshipIDs).isDisjoint(with: other.connection.relationshipIDs)
+                let sameStructure = edge.connection.structuralBranchID != nil
+                    && edge.connection.structuralBranchID == other.connection.structuralBranchID
+                let emptyCategoryPort = layout.branches.contains { $0.firstRecordID == nil && same($0.junction, point) }
+                XCTAssertTrue(atDeclaredEndpoints && (samePath || sameStructure || isCardPort(point) || emptyCategoryPort),
+                              "Crossed branches: \(edge.connection.id) / \(other.connection.id) at \(point)", file: file, line: line)
             }
         }
     }
@@ -127,14 +161,14 @@ final class TimelineLayoutTests: XCTestCase {
         let root = try XCTUnwrap(layout.branches.first { $0.categoryID == id(1) })
         let upper = try XCTUnwrap(layout.branches.first { $0.categoryID == id(2) })
         let lower = try XCTUnwrap(layout.branches.first { $0.categoryID == id(3) })
-        XCTAssertGreaterThan(upper.y, root.y)
-        XCTAssertGreaterThan(lower.y, upper.subtreeFrame.maxY)
+        XCTAssertLessThan(upper.y, root.y)
+        XCTAssertGreaterThan(lower.y, root.y)
         XCTAssertEqual(layout.branches.map(\.categoryID), [id(1), id(2), id(4), id(3)])
         for branch in layout.branches where branch.parentID != nil {
             let parent = try XCTUnwrap(layout.branches.first { $0.id == branch.parentID })
             let source = try XCTUnwrap(layout.nodes.first { $0.id == parent.firstRecordID })
             let target = try XCTUnwrap(layout.nodes.first { $0.id == branch.firstRecordID })
-            let route = layout.connections.filter { $0.relationshipID == branch.id + "-fork" }
+            let route = hierarchyPath(layout, to: branch)
             let first = try XCTUnwrap(route.first), last = try XCTUnwrap(route.last)
             XCTAssertEqual(first.kind, .hierarchy)
             XCTAssertEqual(first.sourceRecordID, parent.firstRecordID)
@@ -143,8 +177,8 @@ final class TimelineLayoutTests: XCTestCase {
             assertCardBoundary(last.to, frame: target.frame)
             for (before, after) in zip(route, route.dropFirst()) { XCTAssertEqual(before.to, after.from) }
         }
-        XCTAssertEqual(Set(layout.connections.filter { $0.kind == .hierarchy }.map(\.relationshipID)).count, 3)
-        XCTAssertEqual(Set(layout.connections.filter { $0.kind == .continuation }.map(\.relationshipID)).count, 1)
+        XCTAssertEqual(Set(layout.connections.filter { $0.kind == .hierarchy }.flatMap(\.relationshipIDs)).count, 3)
+        XCTAssertEqual(Set(layout.connections.filter { $0.kind == .continuation }.flatMap(\.relationshipIDs)).count, 1)
         assertNoOverlaps(layout)
     }
 
@@ -172,19 +206,21 @@ final class TimelineLayoutTests: XCTestCase {
         XCTAssertEqual(Set(layout.branches.compactMap(\.categoryID)), [id(1), id(2), id(3)])
         XCTAssertEqual(layout.branches.filter { $0.firstRecordID == nil }.count, 2)
         XCTAssertEqual(layout.nodes.count, 1)
-        XCTAssertTrue(layout.connections.isEmpty, "Empty ancestors use continuous subtree placement, not relationship cables")
+        XCTAssertEqual(Set(layout.connections.flatMap(\.relationshipIDs)).count, 2)
+        try assertCompleteHierarchy(layout)
         let leafOnly = TimelineLayout(categories: [category(3)], records: [record(101, category: 3, time: 1)])
         XCTAssertLessThanOrEqual(layout.size.height - leafOnly.size.height, 2 * (24 + 16 + 32) + 1)
-        XCTAssertLessThan(layout.nodes.first!.frame.minX, 100)
+        let emptyLabelWidth = layout.branches.filter { $0.firstRecordID == nil }.reduce(CGFloat.zero) { $0 + $1.labelFrame.width + 24 }
+        XCTAssertLessThanOrEqual(layout.nodes.first!.frame.minX, 20 + emptyLabelWidth)
         for branch in layout.branches where branch.firstRecordID == nil {
             XCTAssertEqual(branch.startX, branch.endX)
             XCTAssertEqual(branch.junction.x, branch.labelFrame.minX - 8, accuracy: 0.001)
-            XCTAssertEqual(branch.junction.y, branch.labelFrame.midY, accuracy: 0.001)
+            XCTAssertEqual(branch.junction.y, branch.labelFrame.maxY + 8, accuracy: 0.001)
         }
         let nested = try XCTUnwrap(layout.branches.first { $0.categoryID == id(2) })
         let root = try XCTUnwrap(layout.branches.first { $0.categoryID == id(1) })
         XCTAssertTrue(root.subtreeFrame.contains(nested.subtreeFrame))
-        XCTAssertTrue(layout.connections.filter { $0.relationshipID == nested.id + "-fork" }.isEmpty)
+        XCTAssertFalse(hierarchyPath(layout, to: nested).isEmpty)
         assertNoOverlaps(layout)
         let empty = TimelineLayout(categories: categories, records: [])
         XCTAssertTrue(empty.nodes.isEmpty && empty.branches.isEmpty && empty.ticks.isEmpty && empty.connections.isEmpty)
@@ -242,7 +278,7 @@ final class TimelineLayoutTests: XCTestCase {
         XCTAssertFalse(after.branches.contains { $0.categoryID == id(1) })
         XCTAssertFalse(after.nodes.contains { $0.id == first.id })
         let frame = try XCTUnwrap(after.nodes.first { $0.id == second.id }).frame
-        let route = after.connections.filter { $0.relationshipID == child.id + "-fork" }
+        let route = hierarchyPath(after, to: child)
         assertCardBoundary(try XCTUnwrap(route.last).to, frame: frame)
         assertNoOverlaps(after)
     }
@@ -289,7 +325,7 @@ final class TimelineLayoutTests: XCTestCase {
             if branch.firstRecordID != nil {
                 XCTAssertLessThanOrEqual(branch.labelFrame.maxY, branch.y)
             } else {
-                XCTAssertEqual(branch.junction.y, branch.labelFrame.midY, accuracy: 0.001)
+                XCTAssertEqual(branch.junction.y, branch.labelFrame.maxY + 16, accuracy: 0.001)
                 XCTAssertEqual(branch.junction.x, branch.labelFrame.minX - 16, accuracy: 0.001)
             }
             XCTAssertLessThanOrEqual(branch.labelFrame.maxY, layout.size.height)
@@ -301,7 +337,9 @@ final class TimelineLayoutTests: XCTestCase {
                 XCTAssertFalse(branch.labelFrame.intersects(node.frame))
             }
         }
+        try assertCompleteHierarchy(layout)
         assertNoOverlaps(layout)
+        assertNoCrossingRelationships(layout)
     }
 
     func testTallCardKeepsItsWholeBranchAndFollowingSubtreesInSeparateBands() {
@@ -333,18 +371,19 @@ final class TimelineLayoutTests: XCTestCase {
         assertNoOverlaps(layout)
     }
 
-    func testLabelsStayAttachedToTheirFirstCardsWithoutAnEmptyLeadingCorridor() throws {
+    func testLabelsStayAttachedAndEmptyChainsReserveOnlyTheirMeasuredNameWidths() throws {
         let categories = [category(1), category(2, parent: 1), category(3, parent: 2), category(4, parent: 3)]
         let records = [record(101, category: 4, time: 1), record(102, category: 4, time: 2)]
         let layout = TimelineLayout(categories: categories, records: records)
         let leaf = try XCTUnwrap(layout.branches.first { $0.categoryID == id(4) })
         let first = try XCTUnwrap(layout.nodes.first { $0.id == leaf.firstRecordID })
-        XCTAssertLessThan(first.frame.minX, 120)
+        let measuredNames = layout.branches.filter { $0.firstRecordID == nil }.reduce(CGFloat.zero) { $0 + $1.labelFrame.width + 24 }
+        XCTAssertLessThanOrEqual(first.frame.minX, 20 + measuredNames)
         XCTAssertEqual(leaf.labelFrame.minX, first.frame.minX)
         XCTAssertEqual(first.frame.minY - leaf.labelFrame.maxY, 10, accuracy: 0.001)
-        XCTAssertLessThan(layout.size.width, 700)
+        XCTAssertLessThan(layout.size.width, 880)
         XCTAssertEqual(layout.branches.filter { $0.firstRecordID != nil }.count, 1)
-        XCTAssertEqual(Set(layout.connections.filter { $0.kind == .continuation }.map(\.relationshipID)).count, 1)
+        XCTAssertEqual(Set(layout.connections.filter { $0.kind == .continuation }.flatMap(\.relationshipIDs)).count, 1)
         assertNoOverlaps(layout)
     }
 
@@ -365,12 +404,13 @@ final class TimelineLayoutTests: XCTestCase {
         let records = (0..<40).map { index in record(101 + index, category: index % 7 + 1, time: TimeInterval(index)) }
         let layout = TimelineLayout(categories: categories, records: records)
         XCTAssertEqual(layout.nodes.count, 40)
-        XCTAssertEqual(Set(layout.connections.map(\.relationshipID)).count, 39)
+        XCTAssertEqual(Set(layout.connections.flatMap(\.relationshipIDs)).count, 39)
+        try assertCompleteHierarchy(layout)
         for branch in layout.branches {
             let first = try XCTUnwrap(layout.nodes.first { $0.id == branch.firstRecordID })
             XCTAssertEqual(first.frame.minY - branch.labelFrame.maxY, 10, accuracy: 0.001)
             if branch.parentID != nil {
-                XCTAssertFalse(layout.connections.filter { $0.relationshipID == branch.id + "-fork" }.isEmpty)
+                XCTAssertFalse(hierarchyPath(layout, to: branch).isEmpty)
             }
         }
         assertNoOverlaps(layout)
@@ -382,7 +422,7 @@ final class TimelineLayoutTests: XCTestCase {
         let records = [record(101, time: 1), record(102, category: 3, time: 2), record(103, category: 5, time: 3), record(104, category: 6, time: 4), record(105, category: 4, time: 5)]
         let initial = TimelineLayout(categories: categories, records: records)
         let labels = Dictionary(uniqueKeysWithValues: initial.branches.map {
-            ($0.id, CGSize(width: 176, height: $0.firstRecordID == nil ? 15 : 18))
+            ($0.id, CGSize(width: $0.firstRecordID == nil ? 42 : 176, height: $0.firstRecordID == nil ? 15 : 18))
         })
         let cards = Dictionary(uniqueKeysWithValues: records.map {
             ($0.id, CGSize(width: 236, height: $0.id == id(104) ? 200 : 116))
@@ -399,11 +439,12 @@ final class TimelineLayoutTests: XCTestCase {
         let root = try XCTUnwrap(layout.branches.first { $0.categoryID == id(1) })
         let nested = try XCTUnwrap(layout.branches.first { $0.categoryID == id(2) })
         XCTAssertTrue(root.subtreeFrame.contains(nested.subtreeFrame))
+        try assertCompleteHierarchy(layout)
         assertNoCrossingRelationships(layout)
         assertNoOverlaps(layout)
     }
 
-    func testEmptyAncestorPlacementClearsWideNeighborLabelsWithoutCables() throws {
+    func testEmptyAncestorBranchesClearWideNeighborLabels() throws {
         let categories = [category(1), category(2), category(3, parent: 2), category(4, parent: 3), category(5)]
         let records = [record(101, category: 1, time: 1), record(102, category: 5, time: 2), record(103, category: 4, time: 3)]
         let initial = TimelineLayout(categories: categories, records: records)
@@ -416,7 +457,7 @@ final class TimelineLayoutTests: XCTestCase {
             if let parentID = branch.parentID {
                 let parent = try XCTUnwrap(layout.branches.first { $0.id == parentID })
                 XCTAssertTrue(parent.subtreeFrame.contains(branch.subtreeFrame))
-                XCTAssertTrue(layout.connections.filter { $0.relationshipID == branch.id + "-fork" }.isEmpty)
+                XCTAssertFalse(hierarchyPath(layout, to: branch).isEmpty)
             }
         }
         assertNoOverlaps(layout)
@@ -434,14 +475,15 @@ final class TimelineLayoutTests: XCTestCase {
         }
         let layout = TimelineLayout(categories: categories, records: records)
         XCTAssertEqual(layout.branches.map(\.categoryID), [id(1), id(2), id(5), id(6), id(3), id(7), id(8), id(4), id(9), id(10)])
-        XCTAssertEqual(Set(layout.connections.filter { $0.kind == .hierarchy }.map(\.relationshipID)).count, 9)
+        XCTAssertEqual(Set(layout.connections.filter { $0.kind == .hierarchy }.flatMap(\.relationshipIDs)).count, 9)
+        try assertCompleteHierarchy(layout)
         let root = try XCTUnwrap(layout.branches.first { $0.categoryID == id(1) })
         XCTAssertEqual(root.depth, 0)
         for branch in layout.branches.dropFirst() {
             let parent = try XCTUnwrap(layout.branches.first { $0.id == branch.parentID })
             XCTAssertEqual(branch.depth, parent.depth + 1)
             XCTAssertTrue(parent.subtreeFrame.contains(branch.subtreeFrame))
-            let route = layout.connections.filter { $0.relationshipID == branch.id + "-fork" }
+            let route = hierarchyPath(layout, to: branch)
             let parentCard = try XCTUnwrap(layout.nodes.first { $0.id == parent.firstRecordID })
             let childCard = try XCTUnwrap(layout.nodes.first { $0.id == branch.firstRecordID })
             assertCardBoundary(try XCTUnwrap(route.first).from, frame: parentCard.frame)
@@ -467,7 +509,8 @@ final class TimelineLayoutTests: XCTestCase {
         })
         let layout = TimelineLayout(categories: categories, records: records, nodeSizes: sizes)
         XCTAssertEqual(layout.nodes.count, 40)
-        XCTAssertEqual(Set(layout.connections.map(\.relationshipID)).count, 39)
+        XCTAssertEqual(Set(layout.connections.flatMap(\.relationshipIDs)).count, 39)
+        try assertCompleteHierarchy(layout)
         for branch in layout.branches {
             let own = layout.nodes.filter { $0.branchID == branch.id }
             let y = try XCTUnwrap(own.first).frame.midY
@@ -483,19 +526,92 @@ final class TimelineLayoutTests: XCTestCase {
     }
 
 
-    func testContentParentAndEmptyChildKeepContinuousSubtreeBoundsWithoutCables() throws {
+    func testContentParentConnectsEveryEmptyChildAndItsDescendantsFromTheRealFirstCard() throws {
         let categories = [category(1), category(2, parent: 1), category(3, parent: 2)]
         let layout = TimelineLayout(categories: categories, records: [record(101, category: 1, time: 3), record(102, category: 3, time: 1)])
         let parent = try XCTUnwrap(layout.branches.first { $0.categoryID == id(1) })
         let emptyChild = try XCTUnwrap(layout.branches.first { $0.categoryID == id(2) })
         let leaf = try XCTUnwrap(layout.branches.first { $0.categoryID == id(3) })
-        XCTAssertTrue(layout.connections.isEmpty)
+        try assertCompleteHierarchy(layout)
+        assertNoCrossingRelationships(layout)
         XCTAssertEqual(emptyChild.parentID, parent.id)
         XCTAssertEqual(leaf.parentID, emptyChild.id)
         XCTAssertTrue(parent.subtreeFrame.contains(emptyChild.subtreeFrame))
         XCTAssertTrue(emptyChild.subtreeFrame.contains(leaf.subtreeFrame))
         XCTAssertEqual(layout.branches.map(\.depth), [0, 1, 2])
         assertNoOverlaps(layout)
+    }
+
+
+    func testFiveRecordTreeKeepsLifeToWorkSeparateFromThePersonalFirstCardFork() throws {
+        let categories = [category(1), category(2, parent: 1), category(3, parent: 2),
+                          category(4, parent: 3), category(5, parent: 3), category(6, parent: 1)]
+        let records = [record(101, time: 0), record(102, category: 3, time: 10), record(103, category: 6, time: 20),
+                       record(104, category: 5, time: 30), record(105, category: 4, time: 40)]
+        let layout = TimelineLayout(categories: categories, records: records)
+        let life = try XCTUnwrap(layout.branches.first { $0.categoryID == id(1) })
+        let family = try XCTUnwrap(layout.branches.first { $0.categoryID == id(2) })
+        let personal = try XCTUnwrap(layout.branches.first { $0.categoryID == id(3) })
+        let work = try XCTUnwrap(layout.branches.first { $0.categoryID == id(6) })
+        XCTAssertEqual(work.parentID, life.id)
+        XCTAssertEqual(personal.parentID, family.id)
+        let familyPath = hierarchyPath(layout, to: family)
+        let personalPath = hierarchyPath(layout, to: personal)
+        XCTAssertEqual(familyPath.last?.to, personalPath.first?.from)
+        XCTAssertTrue(hierarchyPath(layout, to: work).allSatisfy {
+            $0.sourceRecordID != personal.firstRecordID && $0.targetRecordID != personal.firstRecordID
+        })
+        for child in layout.branches where child.parentID == personal.id {
+            XCTAssertEqual(hierarchyPath(layout, to: child).first?.sourceRecordID, personal.firstRecordID)
+        }
+        let lifeStructure = layout.connections.filter { $0.structuralBranchID == life.id }
+        XCTAssertEqual(Set(lifeStructure.flatMap(\.relationshipIDs)), [family.id + "-fork", work.id + "-fork"])
+        XCTAssertTrue(layout.connections.filter { $0.structuralBranchID == family.id }.allSatisfy { $0.relationshipIDs.count == 1 })
+        try assertCompleteHierarchy(layout)
+        assertNoOverlaps(layout)
+        assertNoCrossingRelationships(layout)
+    }
+
+    func testFortyRecordsKeepEmptyAncestorsCompleteAndAnySharedTrunkDrawnOnce() throws {
+        let categories = [category(1), category(2, parent: 1), category(3, parent: 1), category(4, parent: 2),
+                          category(5, parent: 2), category(6, parent: 5), category(7, parent: 3)]
+        let lanes = [3, 4, 6, 7]
+        let records = (0..<40).map { index in
+            let lane = lanes[index % lanes.count]
+            return record(101 + index, category: lane, time: TimeInterval(index + (lane == 3 ? 100 : 0)))
+        }
+        let layout = TimelineLayout(categories: categories, records: records)
+        XCTAssertEqual(layout.nodes.count, records.count)
+        XCTAssertEqual(Set(layout.nodes.map(\.id)).count, records.count)
+        XCTAssertEqual(Set(layout.connections.flatMap(\.relationshipIDs)).count, 42)
+        for parent in layout.branches where parent.firstRecordID == nil {
+            let children = layout.branches.filter { $0.parentID == parent.id }
+            let structural = layout.connections.filter { $0.structuralBranchID == parent.id }
+            XCTAssertFalse(structural.isEmpty)
+            let childEndYs = children.map { child -> CGFloat in
+                child.firstRecordID.flatMap { id in layout.nodes.first { $0.id == id }?.frame.midY } ?? child.junction.y
+            }
+            XCTAssertEqual(structural.flatMap { [$0.from.y, $0.to.y] }.max(), childEndYs.max())
+            XCTAssertEqual(parent.junction.x, parent.labelFrame.minX - 8, accuracy: 0.001)
+            XCTAssertEqual(parent.junction.y, parent.labelFrame.maxY + 8, accuracy: 0.001)
+        }
+        try assertCompleteHierarchy(layout)
+        assertNoOverlaps(layout)
+        assertNoCrossingRelationships(layout)
+    }
+
+
+    func testEmptyParentWithThreeEqualChildrenKeepsItsMiddleArmBelowTheName() throws {
+        let categories = [category(1), category(2, parent: 1), category(3, parent: 1), category(4, parent: 1)]
+        let records = [record(101, category: 2, time: 1), record(102, category: 3, time: 2), record(103, category: 4, time: 3)]
+        let layout = TimelineLayout(categories: categories, records: records)
+        let parent = try XCTUnwrap(layout.branches.first { $0.categoryID == id(1) })
+        let middle = try XCTUnwrap(layout.nodes.first { $0.id == id(102) })
+        XCTAssertEqual(parent.junction.y, middle.frame.midY, accuracy: 0.001)
+        XCTAssertEqual(parent.junction.y - parent.labelFrame.maxY, 8, accuracy: 0.001)
+        try assertCompleteHierarchy(layout)
+        assertNoOverlaps(layout)
+        assertNoCrossingRelationships(layout)
     }
 
 }

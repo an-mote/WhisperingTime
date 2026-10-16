@@ -110,6 +110,7 @@ struct TimelineReview: View {
 
     private var tree: some View {
         let groupedNodes = Dictionary(grouping: layout.nodes, by: \.branchID)
+        let measuredGeneration = measurementGeneration
         return ZStack(alignment: .topLeading) {
             Canvas { context, _ in
                 for edge in layout.connections {
@@ -121,12 +122,12 @@ struct TimelineReview: View {
             }.accessibilityHidden(true).allowsHitTesting(false)
             ForEach(layout.branches) { branch in
                 ZStack(alignment: .topLeading) {
-                    branchHeading(branch)
-                        .frame(width: branch.labelFrame.width, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
+                    TimelineHeadingLayout(maximumWidth: 176 * textScale) {
+                        branchHeading(branch)
+                    }
                         .background {
                             GeometryReader { geometry in
-                                Color.clear.preference(key: TimelineBranchSizes.self, value: [branch.id: TimelineMeasurement(size: CGSize(width: geometry.size.width, height: ceil(geometry.size.height)), scale: textScale, generation: measurementGeneration)])
+                                Color.clear.preference(key: TimelineBranchSizes.self, value: [branch.id: TimelineMeasurement(size: CGSize(width: geometry.size.width, height: ceil(geometry.size.height)), scale: textScale, generation: measuredGeneration)])
                             }
                         }
                         .frame(width: branch.labelFrame.width, height: branch.labelFrame.height, alignment: .leading)
@@ -147,7 +148,7 @@ struct TimelineReview: View {
                             .fixedSize(horizontal: false, vertical: true)
                             .background {
                                 GeometryReader { geometry in
-                                    Color.clear.preference(key: TimelineNodeSizes.self, value: [node.id: TimelineMeasurement(size: CGSize(width: geometry.size.width, height: ceil(geometry.size.height)), scale: textScale, generation: measurementGeneration)])
+                                    Color.clear.preference(key: TimelineNodeSizes.self, value: [node.id: TimelineMeasurement(size: CGSize(width: geometry.size.width, height: ceil(geometry.size.height)), scale: textScale, generation: measuredGeneration)])
                                 }
                             }
                             .frame(width: node.frame.width, height: node.frame.height, alignment: .center)
@@ -176,6 +177,7 @@ struct TimelineReview: View {
             let changed = current.filter { id, size in
                 guard size.height.isFinite, size.height > 0 else { return false }
                 return abs((labelSizes[id]?.height ?? 0) - size.height) > 0.5
+                    || abs((labelSizes[id]?.width ?? 0) - size.width) > 0.5
             }
             guard !changed.isEmpty else { return }
             labelSizes.merge(changed, uniquingKeysWith: { _, new in new })
@@ -223,7 +225,7 @@ struct TimelineReview: View {
         }
         .padding(.horizontal, ImprintLayout.gutter).padding(.vertical, 12)
         .background(Color(nsColor: .controlBackgroundColor))
-        .accessibilityElement(children: .contain).accessibilityIdentifier("timelineNavigator")
+        .accessibilityElement(children: .contain).accessibilityLabel("时间导航").accessibilityIdentifier("timelineNavigator")
         .focusable()
         .onKeyPress(keys: [.leftArrow, .rightArrow]) { press in
             guard press.modifiers.intersection([.command, .control, .option, .shift]).isEmpty else { return .ignored }
@@ -243,6 +245,20 @@ struct TimelineReview: View {
     private func scroll(to target: CGPoint) {
         command = TimelineScrollCommand(serial: command.serial + 1,
                                         target: CGPoint(x: min(scrollRange, max(0, target.x)), y: target.y))
+    }
+}
+
+/// Measure short ancestor names at their natural width while allowing long names to wrap.
+private struct TimelineHeadingLayout: Layout {
+    let maximumWidth: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) -> CGSize {
+        subviews.first?.sizeThatFits(ProposedViewSize(width: maximumWidth, height: nil)) ?? .zero
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) {
+        subviews.first?.place(at: bounds.origin, anchor: .topLeading,
+                              proposal: ProposedViewSize(width: bounds.width, height: nil))
     }
 }
 
@@ -286,7 +302,7 @@ private struct TimelineRecordButton: View {
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: ImprintLayout.radius))
             .overlay {
                 RoundedRectangle(cornerRadius: ImprintLayout.radius)
-                    .strokeBorder(selected ? Color.accentColor : Color.primary.opacity(contrast == .increased ? 0.7 : 0.3), lineWidth: selected ? 2 : 1)
+                    .strokeBorder(selected ? Color.accentColor : Color.primary.opacity(contrast == .increased ? 0.7 : 0.45), lineWidth: selected ? 2 : 1)
             }
             .contentShape(RoundedRectangle(cornerRadius: ImprintLayout.radius))
         }

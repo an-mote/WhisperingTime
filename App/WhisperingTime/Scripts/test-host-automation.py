@@ -132,6 +132,37 @@ class ProcessRecognitionTests(unittest.TestCase):
         self.assertFalse(self.runner("/bin/echo", "echo -XCTest"))
         self.assertTrue(self.runner("/tmp/engine.test", "engine.test -test.timeout=10m0s"))
 
+    def test_native_runner_bundle_without_xctest_option(self):
+        for executable in (
+            "/tmp/PianoRoam-Runner.app/Contents/MacOS/PianoRoam-Runner",
+            "/tmp/Build Products/My Product-Runner.app/Contents/MacOS/My Product-Runner",
+        ):
+            with self.subTest(executable=executable):
+                self.assertTrue(self.runner(executable, executable + " -NSTreatUnknownArgumentsAsOpen NO -ApplePersistenceIgnoreState YES"))
+        self.assertFalse(self.runner("/tmp/PianoRoam-Runner", "PianoRoam-Runner --preview"))
+        self.assertFalse(self.runner("/tmp/PianoRoam-Runner.app/Contents/MacOS/Preview", "Preview"))
+        self.assertFalse(self.runner("/tmp/PianoRoam.app/Contents/MacOS/PianoRoam", "PianoRoam --log PianoRoam-Runner.app"))
+
+    def test_xcodebuild_actions_not_option_values(self):
+        executable = "/Applications/Xcode Beta.app/Contents/Developer/usr/bin/xcodebuild"
+        for arguments in (
+            "test -scheme Product",
+            "-project '/repo/Project With Spaces.xcodeproj' -scheme Product test",
+            "-xctestrun '/tmp/Build Products/Plan.xctestrun' test-without-building",
+            "-scheme test -configuration Debug test-without-building",
+        ):
+            with self.subTest(arguments=arguments):
+                self.assertTrue(self.runner(executable, executable + " " + arguments))
+        for arguments in (
+            "build -scheme Product",
+            "-scheme test -configuration test build",
+            "-project test -destination test build-for-testing",
+            "-scheme Product -showBuildSettings",
+            "build TEST_LABEL=test",
+        ):
+            with self.subTest(arguments=arguments):
+                self.assertFalse(self.runner(executable, executable + " " + arguments))
+
     def test_python_test_invocations(self):
         for executable, arguments in (
             ("/usr/bin/python3", "python3 -m pytest test_file.py"),
@@ -166,7 +197,7 @@ class ProcessRecognitionTests(unittest.TestCase):
             ("/usr/bin/node", "node /project/node_modules/playwright/cli.js show-report", "S"),
             ("/usr/bin/node", "node /project/node_modules/cypress/bin/cypress open", "S"),
             ("/bin/zsh", "zsh -c 'python -m pytest'", "S"),
-            ("/usr/bin/xcodebuild", "xcodebuild test -scheme ProductUITests-Runner", "S"),
+            ("/usr/bin/xcodebuild", "xcodebuild build -scheme ProductUITests-Runner", "S"),
             ("/usr/bin/node", "node xcodebuildmcp macos test", "S"),
             ("/usr/local/bin/go", "go test ./...", "S"),
             ("/tmp/example.test", "example.test --preview", "S"),
@@ -185,6 +216,17 @@ class ProcessRecognitionTests(unittest.TestCase):
             Process(101, 1, "S", "/tmp/xctest"),
         ]
         self.assertEqual([process.pid for process in gate_module.busy_processes(processes, 100, 90)], [101])
+
+    def test_native_runner_and_xcodebuild_ancestors_are_excluded(self):
+        executable = "/tmp/PianoRoam-Runner.app/Contents/MacOS/PianoRoam-Runner"
+        processes = [
+            Process(100, 90, "S", "/usr/bin/python3", "python3 host-automation.py wait"),
+            Process(90, 80, "S", executable, executable),
+            Process(80, 1, "S", "/usr/bin/xcodebuild", "xcodebuild -scheme PianoRoam test"),
+            Process(101, 1, "S", executable, executable),
+            Process(102, 1, "S", "/usr/bin/xcodebuild", "xcodebuild test-without-building"),
+        ]
+        self.assertEqual([process.pid for process in gate_module.busy_processes(processes, 100, 90)], [101, 102])
 
     def test_ps_columns_keep_full_executable_path(self):
         with mock.patch.object(gate_module, "_ps", side_effect=[

@@ -29,7 +29,7 @@ struct TimelineLayout {
 
     enum ConnectionKind: Equatable { case hierarchy, continuation }
 
-    /// One smooth segment of a relationship. Ordered segments share a relationshipID.
+    /// One drawn segment. Shared structural trunks are drawn once and carry every path that uses them.
     struct Connection: Identifiable, Equatable {
         let id: String
         let from: CGPoint
@@ -37,9 +37,25 @@ struct TimelineLayout {
         let control1: CGPoint
         let control2: CGPoint
         let relationshipID: String
+        let relationshipIDs: [String]
         let sourceRecordID: UUID?
         let targetRecordID: UUID?
         let kind: ConnectionKind
+        /// The empty category that owns this shared trunk or one of its structural arms.
+        let structuralBranchID: String?
+
+        init(
+            id: String, from: CGPoint, to: CGPoint, control1: CGPoint, control2: CGPoint,
+            relationshipID: String, sourceRecordID: UUID?, targetRecordID: UUID?, kind: ConnectionKind,
+            relationshipIDs: [String]? = nil, structuralBranchID: String? = nil
+        ) {
+            self.id = id; self.from = from; self.to = to
+            self.control1 = control1; self.control2 = control2
+            self.relationshipID = relationshipID
+            self.relationshipIDs = relationshipIDs ?? [relationshipID]
+            self.sourceRecordID = sourceRecordID; self.targetRecordID = targetRecordID
+            self.kind = kind; self.structuralBranchID = structuralBranchID
+        }
     }
 
     struct Tick: Identifiable, Equatable {
@@ -189,10 +205,14 @@ struct TimelineLayout {
             result[record.id] = value.isFinite && value > 0 ? max(value, 72 * scale) : defaultHeight
         }
         let measuredLabels = branchOrder.reduce(into: [String: CGSize]()) { result, branchKey in
-            let width = labelSizes[branchKey]?.width ?? labelWidth
+            let isStructural = grouped[branchKey, default: []].isEmpty
+            let estimatedWidth = isStructural
+                ? min(labelWidth, max(28 * scale, CGFloat(categoryByKey[branchKey]?.name.count ?? 2) * 14 * scale))
+                : labelWidth
+            let width = labelSizes[branchKey]?.width ?? estimatedWidth
             let height = labelSizes[branchKey]?.height ?? labelHeight
             result[branchKey] = CGSize(
-                width: width.isFinite && width > 0 ? max(labelWidth, width) : labelWidth,
+                width: width.isFinite && width > 0 ? (isStructural ? width : max(labelWidth, width)) : estimatedWidth,
                 height: height.isFinite && height > 0 ? height : labelHeight
             )
         }
@@ -210,52 +230,110 @@ struct TimelineLayout {
             previousX = x
         }
 
-        // Each subtree owns one continuous band. Its narrow left gutter contains only its own forks;
-        // descendants' gutters are nested to the right, so unrelated edges cannot weave through a group.
+        // Subtrees keep continuous vertical bands. Empty names occupy only a measured short branch to the
+        // left of their children; they never reserve a fake content row or a full-width hierarchy column.
         var groupLeft: [String: CGFloat] = [:]
         var channelBase: [String: CGFloat] = [:]
+        var structuralX: [String: CGFloat] = [:]
         for branchKey in branchOrder.reversed() {
-            let ownLeft = grouped[branchKey, default: []].compactMap { columnX[$0.id] }.min() ?? .greatestFiniteMagnitude
-            let descendantLeft = treeChildren[branchKey, default: []].compactMap { groupLeft[$0] }.min() ?? .greatestFiniteMagnitude
+            let own = grouped[branchKey, default: []]
+            let descendants = treeChildren[branchKey, default: []]
+            let ownLeft = own.compactMap { columnX[$0.id] }.min() ?? .greatestFiniteMagnitude
+            let descendantLeft = descendants.compactMap { groupLeft[$0] }.min() ?? .greatestFiniteMagnitude
             let innerLeft = min(ownLeft, descendantLeft)
             channelBase[branchKey] = innerLeft
-            let cableCount = grouped[branchKey, default: []].isEmpty ? 0 : treeChildren[branchKey, default: []].filter {
-                !grouped[$0, default: []].isEmpty
-            }.count
-            groupLeft[branchKey] = innerLeft - groupInset - CGFloat(cableCount) * channelStep
+            if own.isEmpty {
+                let width = measuredLabels[branchKey]?.width ?? labelWidth
+                structuralX[branchKey] = innerLeft - width - 16 * scale
+                groupLeft[branchKey] = structuralX[branchKey]! - 8 * scale
+            } else {
+                groupLeft[branchKey] = innerLeft - groupInset - CGFloat(descendants.count) * channelStep
+            }
         }
         let horizontalShift = max(0, 4 * scale - (groupLeft.values.min() ?? padding))
         for id in Array(columnX.keys) { columnX[id, default: 0] += horizontalShift }
         for branchKey in branchOrder {
             groupLeft[branchKey, default: 0] += horizontalShift
             channelBase[branchKey, default: 0] += horizontalShift
+            if structuralX[branchKey] != nil { structuralX[branchKey, default: 0] += horizontalShift }
         }
 
         var frames: [UUID: CGRect] = [:]
         var labelFrames: [String: CGRect] = [:]
         var junctions: [String: CGPoint] = [:]
         var subtreeFrames: [String: CGRect] = [:]
+        func shiftSubtree(_ branchKey: String, by delta: CGFloat) {
+            for record in grouped[branchKey, default: []] { frames[record.id] = frames[record.id]?.offsetBy(dx: 0, dy: delta) }
+            labelFrames[branchKey] = labelFrames[branchKey]?.offsetBy(dx: 0, dy: delta)
+            if let point = junctions[branchKey] { junctions[branchKey] = CGPoint(x: point.x, y: point.y + delta) }
+            subtreeFrames[branchKey] = subtreeFrames[branchKey]?.offsetBy(dx: 0, dy: delta)
+            for child in treeChildren[branchKey, default: []] { shiftSubtree(child, by: delta) }
+        }
+        func childAnchor(_ branchKey: String) -> CGPoint {
+            if let first = grouped[branchKey]?.first, let frame = frames[first.id] {
+                return CGPoint(x: frame.minX, y: frame.midY)
+            }
+            return junctions[branchKey, default: .zero]
+        }
         func arrange(_ branchKey: String, top: CGFloat) -> CGFloat {
             let own = grouped[branchKey, default: []]
             let descendants = treeChildren[branchKey, default: []]
             let labelSize = measuredLabels[branchKey, default: CGSize(width: labelWidth, height: labelHeight)]
-            var ownBottom: CGFloat
-            if let first = own.first {
+            var bottom: CGFloat
+            if own.isEmpty {
+                var childTop = top
+                bottom = top
+                for child in descendants {
+                    bottom = arrange(child, top: childTop)
+                    childTop = bottom + groupGap
+                }
+                var anchors = descendants.map(childAnchor)
+                var y = ((anchors.first?.y ?? top) + (anchors.last?.y ?? top)) / 2
+                let x = structuralX[branchKey, default: padding]
+                // Keep the name above the branch point. A middle child may share the point's y, so a
+                // centered name would block its horizontal arm. Very tall names need an actual safe gap.
+                if descendants.count > 1, let upper = anchors.filter({ $0.y < y }).map(\.y).max() {
+                    let extra = max(0, 2 * (labelSize.height + 12 * scale - (y - upper)))
+                    if extra > 0 {
+                        for (child, anchor) in zip(descendants, anchors) where anchor.y >= y {
+                            shiftSubtree(child, by: extra)
+                        }
+                        bottom += extra
+                        anchors = descendants.map(childAnchor)
+                        y = ((anchors.first?.y ?? top) + (anchors.last?.y ?? top)) / 2
+                    }
+                }
+                var labelY = y - labelSize.height - 8 * scale
+                if labelY < top + verticalInset {
+                    let delta = top + verticalInset - labelY
+                    for child in descendants { shiftSubtree(child, by: delta) }
+                    y += delta; bottom += delta; labelY += delta
+                }
+                labelFrames[branchKey] = CGRect(x: x + 8 * scale, y: labelY, width: labelSize.width, height: labelSize.height)
+                junctions[branchKey] = CGPoint(x: x, y: y)
+                bottom = max(bottom, labelY + labelSize.height)
+            } else {
+                // Keep the parent content row between its upper and lower child subtrees.
+                let split = (descendants.count + 1) / 2
+                var ownTop = top
+                for child in descendants.prefix(split) {
+                    ownTop = arrange(child, top: ownTop) + groupGap
+                }
+                let first = own[0]
                 let firstHeight = heights[first.id, default: defaultHeight]
                 let maximumHeight = own.map { heights[$0.id, default: defaultHeight] }.max() ?? firstHeight
-                var centerY = top + verticalInset + max(labelSize.height + labelGap + firstHeight / 2, maximumHeight / 2)
+                var centerY = ownTop + verticalInset + max(labelSize.height + labelGap + firstHeight / 2, maximumHeight / 2)
                 var labelY = centerY - firstHeight / 2 - labelGap - labelSize.height
                 let labelX = columnX[first.id, default: padding]
-                // A rare measured label wider than a card must also clear later, taller content in this row.
                 for record in own.dropFirst() {
                     let x = columnX[record.id, default: padding]
                     if x < labelX + labelSize.width {
                         labelY = min(labelY, centerY - heights[record.id, default: defaultHeight] / 2 - labelGap - labelSize.height)
                     }
                 }
-                if labelY < top + verticalInset {
-                    centerY += top + verticalInset - labelY
-                    labelY = top + verticalInset
+                if labelY < ownTop + verticalInset {
+                    centerY += ownTop + verticalInset - labelY
+                    labelY = ownTop + verticalInset
                 }
                 labelFrames[branchKey] = CGRect(x: labelX, y: labelY, width: labelSize.width, height: labelSize.height)
                 for record in own {
@@ -264,20 +342,9 @@ struct TimelineLayout {
                                                width: cardWidth, height: height)
                 }
                 junctions[branchKey] = CGPoint(x: labelX + cardWidth / 2, y: centerY)
-                ownBottom = centerY + maximumHeight / 2
-            } else {
-                let x = channelBase[branchKey, default: padding] + 8 * scale
-                labelFrames[branchKey] = CGRect(x: x, y: top + verticalInset, width: labelSize.width, height: labelSize.height)
-                junctions[branchKey] = CGPoint(x: x - 8 * scale, y: top + verticalInset + labelSize.height / 2)
-                ownBottom = top + verticalInset + labelSize.height
-            }
-            let sourceY = own.first.flatMap { frames[$0.id]?.maxY } ?? junctions[branchKey, default: .zero].y
-            let cableCount = own.isEmpty ? 0 : descendants.filter { !grouped[$0, default: []].isEmpty }.count
-            let fanHeight = cableCount == 0 ? 0 : CGFloat(cableCount + 1) * fanStep
-            var bottom = ownBottom
-            if !descendants.isEmpty {
-                var childTop = max(ownBottom, sourceY + fanHeight) + groupGap
-                for child in descendants {
+                bottom = centerY + maximumHeight / 2
+                var childTop = bottom + groupGap
+                for child in descendants.dropFirst(split) {
                     bottom = arrange(child, top: childTop)
                     childTop = bottom + groupGap
                 }
@@ -290,9 +357,7 @@ struct TimelineLayout {
             return bottom + verticalInset
         }
         var nextTop = padding
-        for root in roots {
-            nextTop = arrange(root, top: nextTop) + groupGap
-        }
+        for root in roots { nextTop = arrange(root, top: nextTop) + groupGap }
         let placedNodes = ordered.map {
             Node(id: $0.id, branchID: recordBranch[$0.id, default: looseKey], frame: frames[$0.id]!)
         }
@@ -326,32 +391,57 @@ struct TimelineLayout {
                                         source: own[index - 1].id, target: own[index].id, kind: .continuation, radius: 0)
             }
         }
-        // Ordered local channels give a planar tree even when a parent's first date is later than a child's.
-        // Later sibling targets use the outer channels and turn sooner; curves share only the real source port.
+        // Each side of an empty parent has one shared structural fallback, never cloned parallel cables.
+        // The natural-curve pass below removes these trunks wherever a direct fan is safe.
         for branch in placedBranches {
-            let descendants = treeChildren[branch.id, default: []].filter { !grouped[$0, default: []].isEmpty }
-            // Empty ancestors use category names and contiguous subtree placement, never a second cable tree.
-            guard !descendants.isEmpty, branch.firstRecordID != nil else { continue }
-            let sourceFrame = branch.firstRecordID.flatMap { frames[$0] }
-            let from = sourceFrame.map { CGPoint(x: $0.midX, y: $0.maxY) } ?? branch.junction
-            for (index, childKey) in descendants.enumerated() {
-                guard let child = branchLookup[childKey] else { continue }
-                let targetFrame = child.firstRecordID.flatMap { frames[$0] }
-                let to = targetFrame.map { CGPoint(x: $0.minX, y: $0.midY) } ?? child.junction
-                let channelX = channelBase[branch.id, default: from.x] - CGFloat(index + 1) * channelStep
-                let fanHeight = CGFloat(descendants.count - index + 1) * fanStep
-                let turn = CGPoint(x: channelX, y: from.y + fanHeight)
-                let relationship = child.id + "-fork"
-                segments.append(Connection(
-                    id: relationship + "-fan", from: from, to: turn,
-                    control1: CGPoint(x: from.x, y: from.y + fanHeight / 2),
-                    control2: CGPoint(x: channelX, y: turn.y - fanHeight / 2),
-                    relationshipID: relationship, sourceRecordID: branch.firstRecordID,
-                    targetRecordID: child.firstRecordID, kind: .hierarchy
-                ))
-                segments += Self.smooth([turn, CGPoint(x: channelX, y: to.y), to], id: relationship,
-                                        source: branch.firstRecordID, target: child.firstRecordID,
-                                        kind: .hierarchy, radius: 6 * scale)
+            let descendants = treeChildren[branch.id, default: []]
+            guard !descendants.isEmpty else { continue }
+            let anchor = branch.junction
+            let above = descendants.filter { childAnchor($0).y < anchor.y }.reversed()
+            let below = descendants.filter { childAnchor($0).y >= anchor.y }
+            for (side, orderedChildren) in [(CGFloat(-1), Array(above)), (CGFloat(1), below)] {
+                guard !orderedChildren.isEmpty else { continue }
+                if branch.firstRecordID == nil {
+                    var trunkStart = anchor
+                    for (index, childKey) in orderedChildren.enumerated() {
+                        guard let child = branchLookup[childKey] else { continue }
+                        let to = childAnchor(childKey)
+                        let radius = min(6 * scale, max(0, (to.x - anchor.x) / 2), abs(to.y - anchor.y) / 2)
+                        let fork = CGPoint(x: anchor.x, y: to.y - side * radius)
+                        let relationship = child.id + "-fork"
+                        let remaining = orderedChildren.dropFirst(index).map { $0 + "-fork" }
+                        segments += Self.smooth([trunkStart, fork], id: branch.id + "-trunk-\(side)-\(index)",
+                                                source: nil, target: nil, kind: .hierarchy, radius: 0,
+                                                relationshipIDs: remaining, structuralBranchID: branch.id)
+                        segments += Self.smooth([fork, CGPoint(x: fork.x, y: to.y), to], id: relationship,
+                                                source: nil, target: child.firstRecordID, kind: .hierarchy, radius: radius,
+                                                structuralBranchID: branch.id)
+                        trunkStart = fork
+                    }
+                    continue
+                }
+                let sourceFrame = frames[branch.firstRecordID!]!
+                // Upper fallbacks leave the first card's left port, clearing its heading; lower ones leave its bottom.
+                let from = side < 0 ? CGPoint(x: sourceFrame.minX, y: sourceFrame.midY)
+                    : CGPoint(x: sourceFrame.midX, y: sourceFrame.maxY)
+                for (index, childKey) in orderedChildren.enumerated() {
+                    guard let child = branchLookup[childKey] else { continue }
+                    let to = childAnchor(childKey)
+                    let channelX = channelBase[branch.id, default: from.x] - CGFloat(index + 1) * channelStep
+                    let fanHeight = CGFloat(orderedChildren.count - index + 1) * fanStep
+                    let turn = CGPoint(x: channelX, y: from.y + side * fanHeight)
+                    let relationship = child.id + "-fork"
+                    segments.append(Connection(
+                        id: relationship + "-fan", from: from, to: turn,
+                        control1: CGPoint(x: from.x, y: from.y + side * fanHeight / 2),
+                        control2: CGPoint(x: channelX, y: turn.y - side * fanHeight / 2),
+                        relationshipID: relationship, sourceRecordID: branch.firstRecordID,
+                        targetRecordID: child.firstRecordID, kind: .hierarchy
+                    ))
+                    segments += Self.smooth([turn, CGPoint(x: channelX, y: to.y), to], id: relationship,
+                                            source: branch.firstRecordID, target: child.firstRecordID,
+                                            kind: .hierarchy, radius: 6 * scale)
+                }
             }
         }
         let obstacles = placedNodes.map(\.frame) + placedBranches.map(\.labelFrame)
@@ -382,10 +472,11 @@ struct TimelineLayout {
             let point = CGPoint(x: a.x + t * x, y: a.y + t * y)
             return !allowed.contains { hypot($0.x - point.x, $0.y - point.y) < 0.001 }
         }
-        func isClear(_ candidate: Connection, source: CGRect, target: CGRect, otherRoutes: [Connection]) -> Bool {
+        func isClear(_ candidate: Connection, source: CGRect?, target: CGRect?, otherRoutes: [Connection]) -> Bool {
             let points = samples(candidate)
             let walls = obstacles.map { frame in
-                frame == source || frame == target ? frame.insetBy(dx: 0.1, dy: 0.1) : frame.insetBy(dx: -3 * scale, dy: -3 * scale)
+                source.map({ frame == $0 }) == true || target.map({ frame == $0 }) == true
+                    ? frame.insetBy(dx: 0.1, dy: 0.1) : frame.insetBy(dx: -3 * scale, dy: -3 * scale)
             }
             guard points.allSatisfy({ point in point.x >= 0 && point.y >= 0 && !walls.contains { $0.contains(point) } }) else { return false }
             for other in otherRoutes {
@@ -401,35 +492,62 @@ struct TimelineLayout {
             }
             return true
         }
-        // Keep the planar fallback until a short natural curve is proven clear of all remaining routes.
-        // This avoids a greedy direct edge trapping a later relationship into a crossing or an outer loop.
+        // Keep each remaining fallback until a natural curve is clear. Shared trunk metadata is reduced
+        // rather than deleting geometry still used by a sibling path.
+        func removing(_ relationship: String, from routes: [Connection]) -> [Connection] {
+            routes.compactMap { edge in
+                let remaining = edge.relationshipIDs.filter { $0 != relationship }
+                guard !remaining.isEmpty else { return nil }
+                guard remaining.count != edge.relationshipIDs.count else { return edge }
+                return Connection(id: edge.id, from: edge.from, to: edge.to, control1: edge.control1, control2: edge.control2,
+                                  relationshipID: remaining[0], sourceRecordID: edge.sourceRecordID, targetRecordID: edge.targetRecordID,
+                                  kind: edge.kind, relationshipIDs: remaining, structuralBranchID: edge.structuralBranchID)
+            }
+        }
         for branch in placedBranches {
-            guard let parentID = branch.parentID, let parent = branchLookup[parentID],
-                  let sourceID = parent.firstRecordID, let targetID = branch.firstRecordID,
-                  let source = frames[sourceID], let target = frames[targetID] else { continue }
+            guard let parentID = branch.parentID, let parent = branchLookup[parentID] else { continue }
+            let sourceID = parent.firstRecordID, targetID = branch.firstRecordID
+            let source = sourceID.flatMap { frames[$0] }, target = targetID.flatMap { frames[$0] }
             let relationship = branch.id + "-fork"
-            let otherRoutes = segments.filter { $0.relationshipID != relationship }
-            let forward: CGFloat = target.midX >= source.midX ? 1 : -1
-            let horizontal = CGPoint(x: forward, y: 0), vertical = CGPoint(x: 0, y: 1)
-            let sourceSide = CGPoint(x: forward > 0 ? source.maxX : source.minX, y: source.midY)
-            let targetSide = CGPoint(x: forward > 0 ? target.minX : target.maxX, y: target.midY)
-            let sourceBottom = CGPoint(x: source.midX, y: source.maxY)
-            let targetTop = CGPoint(x: target.midX, y: target.minY)
-            let ports: [(CGPoint, CGPoint, CGPoint, CGPoint)] = [
-                (sourceSide, targetSide, horizontal, horizontal),
-                (sourceBottom, targetSide, vertical, horizontal),
-                (sourceSide, targetTop, horizontal, vertical),
-                (sourceBottom, targetTop, vertical, vertical)
-            ]
+            let otherRoutes = removing(relationship, from: segments)
+            let sourceCenter = source.map { CGPoint(x: $0.midX, y: $0.midY) } ?? parent.junction
+            let targetCenter = target.map { CGPoint(x: $0.midX, y: $0.midY) } ?? branch.junction
+            let forward: CGFloat = targetCenter.x >= sourceCenter.x ? 1 : -1
+            let side: CGFloat = targetCenter.y >= sourceCenter.y ? 1 : -1
+            let horizontal = CGPoint(x: forward, y: 0), vertical = CGPoint(x: 0, y: side)
+            let fromSide = source.map { CGPoint(x: forward > 0 ? $0.maxX : $0.minX, y: $0.midY) } ?? parent.junction
+            let toSide = target.map { CGPoint(x: source == nil || forward > 0 ? $0.minX : $0.maxX, y: $0.midY) } ?? branch.junction
+            let incoming = target == nil || source == nil ? CGPoint(x: 1, y: 0) : horizontal
+            var ports: [(CGPoint, CGPoint, CGPoint, CGPoint)] = []
+            if let source {
+                let fromVertical = CGPoint(x: source.midX, y: side < 0 ? source.minY : source.maxY)
+                ports = [(fromSide, toSide, horizontal, incoming), (fromVertical, toSide, vertical, incoming)]
+                if let target {
+                    let toVertical = CGPoint(x: target.midX, y: side < 0 ? target.maxY : target.minY)
+                    ports += [(fromSide, toVertical, horizontal, vertical), (fromVertical, toVertical, vertical, vertical)]
+                }
+            } else {
+                let outgoing = abs(targetCenter.y - sourceCenter.y) < 0.001 ? CGPoint(x: 1, y: 0) : vertical
+                ports = [(parent.junction, toSide, outgoing, incoming)]
+            }
             var replacement: Connection?
             for (from, to, outward, inward) in ports {
                 let length = max(28 * scale, min(140 * scale, abs(to.x - from.x) * 0.45 + abs(to.y - from.y) * 0.1))
-                for factor in [CGFloat(1), 0.5, 1.5] {
+                var lengths = [CGFloat(1), 0.5, 1.5, 2.5].map { (length * $0, length) }
+                if source == nil {
+                    if abs(to.y - from.y) < 0.001 {
+                        lengths.insert((abs(to.x - from.x) / 3, abs(to.x - from.x) / 3), at: 0)
+                    } else {
+                        lengths.insert((abs(to.y - from.y) * 0.7, max(20 * scale, min(100 * scale, abs(to.x - from.x) * 0.65))), at: 0)
+                    }
+                }
+                for (outLength, inLength) in lengths {
                     let curve = Connection(
                         id: relationship + "-direct", from: from, to: to,
-                        control1: CGPoint(x: from.x + outward.x * length * factor, y: from.y + outward.y * length * factor),
-                        control2: CGPoint(x: to.x - inward.x * length, y: to.y - inward.y * length),
-                        relationshipID: relationship, sourceRecordID: sourceID, targetRecordID: targetID, kind: .hierarchy
+                        control1: CGPoint(x: from.x + outward.x * outLength, y: from.y + outward.y * outLength),
+                        control2: CGPoint(x: to.x - inward.x * inLength, y: to.y - inward.y * inLength),
+                        relationshipID: relationship, sourceRecordID: sourceID, targetRecordID: targetID, kind: .hierarchy,
+                        structuralBranchID: source == nil ? parent.id : nil
                     )
                     if isClear(curve, source: source, target: target, otherRoutes: otherRoutes) {
                         replacement = curve
@@ -438,10 +556,7 @@ struct TimelineLayout {
                 }
                 if replacement != nil { break }
             }
-            if let replacement {
-                segments.removeAll { $0.relationshipID == relationship }
-                segments.append(replacement)
-            }
+            if let replacement { segments = otherRoutes + [replacement] }
         }
         connections = segments
         var lastMonth: DateComponents?
@@ -463,7 +578,10 @@ struct TimelineLayout {
                       height: (extents.map(\.maxY).max() ?? defaultHeight) + padding)
     }
 
-    private static func smooth(_ points: [CGPoint], id: String, source: UUID?, target: UUID?, kind: ConnectionKind, radius: CGFloat) -> [Connection] {
+    private static func smooth(
+        _ points: [CGPoint], id: String, source: UUID?, target: UUID?, kind: ConnectionKind, radius: CGFloat,
+        relationshipIDs: [String]? = nil, structuralBranchID: String? = nil
+    ) -> [Connection] {
         var path: [CGPoint] = []
         for point in points {
             guard path.last != point else { continue }
@@ -477,8 +595,10 @@ struct TimelineLayout {
         var result: [Connection] = []
         func append(_ from: CGPoint, _ to: CGPoint, _ c1: CGPoint, _ c2: CGPoint) {
             guard from != to else { return }
+            let relationships = relationshipIDs ?? [id]
             result.append(Connection(id: id + "-\(result.count)", from: from, to: to, control1: c1, control2: c2,
-                                     relationshipID: id, sourceRecordID: source, targetRecordID: target, kind: kind))
+                                     relationshipID: relationships.first ?? id, sourceRecordID: source, targetRecordID: target,
+                                     kind: kind, relationshipIDs: relationships, structuralBranchID: structuralBranchID))
         }
         func line(_ from: CGPoint, _ to: CGPoint) {
             append(from, to, CGPoint(x: from.x + (to.x - from.x) / 3, y: from.y + (to.y - from.y) / 3),
