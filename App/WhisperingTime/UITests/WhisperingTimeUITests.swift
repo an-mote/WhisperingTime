@@ -37,6 +37,46 @@ final class WhisperingTimeUITests: XCTestCase {
         return app
     }
 
+    /// Writes a UUID-scoped TMP fixture, using the production manifest's millisecond date encoding.
+    private func prepareTimelineOverflowLibrary() throws -> URL {
+        var repository = URL(fileURLWithPath: #filePath)
+        for _ in 0..<4 { repository.deleteLastPathComponent() }
+        let root = repository.appendingPathComponent("TMP/时间轴视觉修正/2026-10-16/界面测试夹具", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let categoryIDs = (0..<3).map { _ in UUID().uuidString }
+        let categories: [[String: Any]] = [
+            ["id": categoryIDs[0], "name": "生活"],
+            ["id": categoryIDs[1], "name": "随笔", "parentID": categoryIDs[0]],
+            ["id": categoryIDs[2], "name": "工作", "parentID": categoryIDs[0]],
+        ]
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let records: [[String: Any]] = try (0..<40).map { index in
+            let day = try XCTUnwrap(calendar.date(byAdding: .day, value: -(index + 1), to: today))
+            let date = try XCTUnwrap(calendar.date(byAdding: .hour, value: 12, to: day))
+            let milliseconds = date.timeIntervalSince1970 * 1_000
+            var record: [String: Any] = [
+                "id": UUID().uuidString,
+                "title": "第\(index + 1)天的回顾",
+                "categoryID": categoryIDs[index % categoryIDs.count],
+                "occurredAt": milliseconds,
+                "updatedAt": milliseconds,
+                "body": "第\(index + 1)天留下的一段中文记录。用于回顾连续日期，以及横向滚动时的视口同步。",
+                "attachments": [Any](),
+                "scales": [Any](),
+            ]
+            // Keep one oldest unclassified record so filtering excludes the newest selection without emptying the canvas.
+            if index == 39 { record.removeValue(forKey: "categoryID") }
+            return record
+        }
+        let manifest: [String: Any] = ["version": 1, "categories": categories, "imprints": records]
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try FileManager.default.removeItem(at: root) }
+        try data.write(to: root.appendingPathComponent("library.json"), options: .atomic)
+        return root
+    }
+
     private func element(_ id: String, in app: XCUIApplication) -> XCUIElement {
         if id == "bodyEditor" || id == "transcriptEditor" { return app.textViews.matching(identifier: id).firstMatch }
         if id == "titleField" { return app.textFields.matching(identifier: id).firstMatch }
@@ -118,6 +158,260 @@ final class WhisperingTimeUITests: XCTestCase {
 
     private func firstImprint(in app: XCUIApplication) -> XCUIElement {
         app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "imprint-")).firstMatch
+    }
+
+    private func imprintButtons(in app: XCUIApplication) -> XCUIElementQuery {
+        app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "imprint-"))
+    }
+
+    private func timelineOffset(in app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) -> CGPoint {
+        let value = element("timelineCanvas", in: app).value as? String ?? ""
+        let components = value.split(separator: ",").compactMap { component -> Double? in
+            guard let number = component.split(separator: "=").last else { return nil }
+            return Double(number)
+        }
+        XCTAssertEqual(components.count, 2, "时间轴必须暴露当前横纵视口：\(value)", file: file, line: line)
+        guard components.count == 2 else { return .zero }
+        return CGPoint(x: components[0], y: components[1])
+    }
+
+    private func moveTimelineToStart(in app: XCUIApplication) {
+        let canvas = element("timelineCanvas", in: app)
+        let earlier = element("timelineEarlier", in: app)
+        // Bound navigation for both the compact demo and the forty-record overflow fixture.
+        for _ in 0..<64 where earlier.isEnabled {
+            let before = canvas.value as? String ?? ""
+            earlier.click()
+            waitFor(NSPredicate(format: "value != %@", before), on: canvas)
+        }
+        XCTAssertFalse(earlier.isEnabled, "较早按钮应能到达时间轴起点")
+        XCTAssertEqual(timelineOffset(in: app).x, 0, accuracy: 2)
+    }
+
+    private func assertTimelineNavigator(in app: XCUIApplication, configuration: String) {
+        let canvas = element("timelineCanvas", in: app)
+        let navigator = element("timelineNavigator", in: app)
+        let range = element("timelineVisibleRange", in: app)
+        XCTAssertTrue(navigator.waitForExistence(timeout: 5), "底部导航未出现：\(configuration)")
+        for id in ["timelineEarlier", "timelineLater", "timelineScroller", "timelineVisibleRange"] {
+            let control = element(id, in: app)
+            XCTAssertTrue(control.waitForExistence(timeout: 5), "时间导航控件未出现：\(configuration) / \(id)")
+            // Disabled end buttons remain visible and keyboard discoverable; only enabled controls need a hit target.
+            if control.isEnabled { waitFor(NSPredicate(format: "hittable == true"), on: control) }
+            XCTAssertTrue(app.windows.firstMatch.frame.intersects(control.frame), "时间导航控件超出窗口：\(configuration) / \(id)")
+        }
+        XCTAssertGreaterThanOrEqual(navigator.frame.minY, canvas.frame.maxY - 2, "时间导航应固定在画布下方：\(configuration)")
+        XCTAssertLessThanOrEqual(navigator.frame.maxY, app.windows.firstMatch.frame.maxY + 1)
+        XCTAssertNotNil(accessibleText(range).range(of: #"\d{4}"#, options: .regularExpression), "隐藏时间仍应保留年份导航：\(configuration)")
+        XCTAssertTrue(accessibleText(range).contains("月"), "隐藏时间仍应保留月份导航：\(configuration)")
+    }
+
+    func testRootTimelineHasOneNodePerImprintAndNavigationDoesNotSelectOrOpen() throws {
+        let app = launch(demo: true, arguments: ["--qa-window-size", "640x480"])
+        let ids = Set(imprintButtons(in: app).allElementsBoundByIndex.map(\.identifier))
+        XCTAssertTrue(accessibleText(timeControl(in: app)).contains("隐藏时间"))
+        selectMode("时间轴", canvas: "timelineCanvas", app: app)
+        assertTimelineNavigator(in: app, configuration: "最小窗口树根时间轴")
+        let nodes = imprintButtons(in: app).allElementsBoundByIndex
+        XCTAssertEqual(nodes.count, 5, "分支连接点应复用首篇内容，不得重复渲染")
+        XCTAssertEqual(Set(nodes.map(\.identifier)).count, 5, "每篇示例内容只能出现一次")
+        XCTAssertTrue(Set(nodes.map(\.identifier)).isSuperset(of: ids))
+        XCTAssertTrue(nodes.allSatisfy { !$0.isSelected })
+        XCTAssertTrue(element("timelineBranch-unclassified", in: app).exists)
+
+        let canvas = element("timelineCanvas", in: app)
+        moveTimelineToStart(in: app)
+        let start = timelineOffset(in: app)
+        let later = element("timelineLater", in: app)
+        if later.isEnabled {
+            XCTAssertTrue(element("timelineScroller", in: app).isEnabled)
+            let before = canvas.value as? String ?? ""
+            later.click()
+            waitFor(NSPredicate(format: "value != %@", before), on: canvas)
+            let advanced = timelineOffset(in: app)
+            XCTAssertGreaterThan(advanced.x, start.x)
+            XCTAssertEqual(advanced.y, start.y, accuracy: 2, "底部时间导航须保留纵向位置")
+            XCTAssertTrue(imprintButtons(in: app).allElementsBoundByIndex.allSatisfy { !$0.isSelected })
+            XCTAssertFalse(element("editImprint", in: app).exists, "时间导航不应打开阅读面板")
+            let advancedValue = canvas.value as? String ?? ""
+            element("timelineEarlier", in: app).click()
+            waitFor(NSPredicate(format: "value != %@", advancedValue), on: canvas)
+            XCTAssertLessThan(timelineOffset(in: app).x, advanced.x)
+        } else {
+            XCTAssertFalse(element("timelineEarlier", in: app).isEnabled, "不足一屏时较早导航应停用")
+            XCTAssertFalse(element("timelineScroller", in: app).isEnabled, "不足一屏时滚动条应停用")
+            XCTAssertEqual(start.x, 0, accuracy: 2)
+        }
+        XCTAssertTrue(imprintButtons(in: app).allElementsBoundByIndex.allSatisfy { !$0.isSelected })
+        XCTAssertFalse(element("editImprint", in: app).exists)
+        keepScreenshot("10-树根时间轴-首篇即连接点与固定导航", app: app)
+        app.terminate()
+    }
+
+    func testRootTimelineNativeScrollerAndCanvasStayInSync() throws {
+        let fixtureRoot = try prepareTimelineOverflowLibrary()
+        let fixtureData = try Data(contentsOf: fixtureRoot.appendingPathComponent("library.json")).base64EncodedString()
+        let app = launch(libraryID: fixtureRoot.lastPathComponent,
+                         arguments: ["--qa-window-size", "640x480", "--qa-library-data", fixtureData])
+        selectMode("时间轴", canvas: "timelineCanvas", app: app)
+        moveTimelineToStart(in: app)
+        let canvas = element("timelineCanvas", in: app)
+        let scroller = element("timelineScroller", in: app)
+        let navigator = element("timelineNavigator", in: app)
+        let footerFrame = navigator.frame
+        XCTAssertEqual(imprintButtons(in: app).count, 40)
+        XCTAssertTrue(scroller.isEnabled, "长夹具须提供实际横向滚动范围")
+        XCTAssertTrue(element("timelineLater", in: app).isEnabled)
+        let start = timelineOffset(in: app)
+        let initialValue = canvas.value as? String ?? ""
+        // Legacy NSScroller exposes a persistent track; at the start its knob covers this point.
+        scroller.coordinate(withNormalizedOffset: CGVector(dx: 0.04, dy: 0.5))
+            .press(forDuration: 0.15, thenDragTo: scroller.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.5)))
+        waitFor(NSPredicate(format: "value != %@", initialValue), on: canvas)
+        let end = timelineOffset(in: app)
+        XCTAssertGreaterThan(end.x, start.x + 20)
+        XCTAssertEqual(end.y, start.y, accuracy: 2)
+        waitFor(NSPredicate(format: "enabled == false"), on: element("timelineLater", in: app))
+        XCTAssertEqual(navigator.frame.minY, footerFrame.minY, accuracy: 1, "导航不能随画布一起滚走")
+        XCTAssertFalse(element("editImprint", in: app).exists)
+
+        let atEndValue = canvas.value as? String ?? ""
+        scroller.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.5))
+            .press(forDuration: 0.15, thenDragTo: scroller.coordinate(withNormalizedOffset: CGVector(dx: 0.04, dy: 0.5)))
+        waitFor(NSPredicate(format: "value != %@", atEndValue), on: canvas)
+        waitFor(NSPredicate(format: "enabled == false"), on: element("timelineEarlier", in: app))
+        XCTAssertEqual(timelineOffset(in: app).x, 0, accuracy: 2)
+
+        let atStartValue = canvas.value as? String ?? ""
+        scroller.coordinate(withNormalizedOffset: CGVector(dx: 0.04, dy: 0.5))
+            .press(forDuration: 0.15, thenDragTo: scroller.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)))
+        waitFor(NSPredicate(format: "value != %@", atStartValue), on: canvas)
+        let middle = timelineOffset(in: app)
+        XCTAssertGreaterThan(middle.x, 0)
+        XCTAssertLessThan(middle.x, end.x)
+        let scrollerBefore = scroller.value ?? ""
+        let canvasBefore = canvas.value as? String ?? ""
+        // Start inside the range so either system scroll direction moves the canvas in one wheel operation.
+        canvas.scroll(byDeltaX: -120, deltaY: 0)
+        waitFor(NSPredicate(format: "value != %@", canvasBefore), on: canvas)
+        waitFor(NSPredicate(format: "value != %@", argumentArray: [scrollerBefore]), on: scroller)
+        XCTAssertNotEqual(timelineOffset(in: app).x, middle.x)
+        XCTAssertEqual(timelineOffset(in: app).y, middle.y, accuracy: 2)
+        XCTAssertTrue(imprintButtons(in: app).allElementsBoundByIndex.allSatisfy { !$0.isSelected })
+        keepScreenshot("11-树根时间轴-原生滚动条与画布双向同步", app: app)
+        app.terminate()
+    }
+
+    func testRootTimelineRestoresViewportAndLocatesSelectionFromCardsAndCalendar() throws {
+        let fixtureRoot = try prepareTimelineOverflowLibrary()
+        let fixtureData = try Data(contentsOf: fixtureRoot.appendingPathComponent("library.json")).base64EncodedString()
+        let app = launch(libraryID: fixtureRoot.lastPathComponent,
+                         arguments: ["--qa-window-size", "640x480", "--qa-library-data", fixtureData])
+        let card = firstImprint(in: app)
+        let selectedID = card.identifier
+        card.click()
+        XCTAssertTrue(element("editImprint", in: app).waitForExistence(timeout: 5))
+        app.buttons["完成"].click()
+        selectMode("时间轴", canvas: "timelineCanvas", app: app)
+        let selected = app.buttons.matching(identifier: selectedID).firstMatch
+        waitFor(NSPredicate(format: "selected == true AND hittable == true"), on: selected)
+        let canvas = element("timelineCanvas", in: app)
+        // Opening and closing is measured while the selected card is known to be visible.
+        // A later horizontal move correctly preserves its branch's vertical position and can reveal empty canvas.
+        let beforeDetail = timelineOffset(in: app)
+        selected.click()
+        XCTAssertTrue(element("editImprint", in: app).waitForExistence(timeout: 5))
+        app.buttons["完成"].click()
+        XCTAssertEqual(timelineOffset(in: app).x, beforeDetail.x, accuracy: 2, "关闭阅读面板应回到原视口")
+        XCTAssertEqual(timelineOffset(in: app).y, beforeDetail.y, accuracy: 2)
+
+        let before = canvas.value as? String ?? ""
+        XCTAssertTrue(element("timelineEarlier", in: app).isEnabled)
+        element("timelineEarlier", in: app).click()
+        waitFor(NSPredicate(format: "value != %@", before), on: canvas)
+        let remembered = timelineOffset(in: app)
+        XCTAssertTrue(selected.isSelected, "滚动画布不能改选内容")
+        selectMode("卡片", canvas: "cardsCanvas", app: app)
+        selectMode("时间轴", canvas: "timelineCanvas", app: app)
+        XCTAssertEqual(timelineOffset(in: app).x, remembered.x, accuracy: 2, "选中项未变化时应恢复视口")
+        XCTAssertEqual(timelineOffset(in: app).y, remembered.y, accuracy: 2)
+
+        // Return to the newest card so the calendar starts with yesterday and its neighboring fixture dates.
+        selectMode("卡片", canvas: "cardsCanvas", app: app)
+        firstImprint(in: app).click()
+        XCTAssertTrue(element("editImprint", in: app).waitForExistence(timeout: 5))
+        app.buttons["完成"].click()
+        selectMode("日历", canvas: "calendarCanvas", app: app)
+        let recordedDates = app.buttons.matching(NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@", "日，", "1 条印迹"))
+        var alternative = recordedDates.allElementsBoundByIndex.first { !$0.isSelected && $0.isHittable }
+        if alternative == nil {
+            // Consecutive fixture dates can cross a month boundary near the first day.
+            app.buttons["上个月"].click()
+            alternative = recordedDates.allElementsBoundByIndex.first { !$0.isSelected && $0.isHittable }
+        }
+        try XCTUnwrap(alternative).click()
+        let calendarRecordID = firstImprint(in: app).identifier
+        XCTAssertFalse(calendarRecordID.isEmpty)
+        selectMode("时间轴", canvas: "timelineCanvas", app: app)
+        let calendarSelection = app.buttons.matching(identifier: calendarRecordID).firstMatch
+        waitFor(NSPredicate(format: "selected == true AND hittable == true"), on: calendarSelection)
+        XCTAssertFalse(element("editImprint", in: app).exists, "同步日历选择应定位内容，不能自动打开面板")
+        keepScreenshot("12-树根时间轴-恢复视口与跨展示定位", app: app)
+        app.terminate()
+    }
+
+    func testRootTimelineLocatesRetainedSelectionWhenReturningFromExcludedCategory() throws {
+        // The regular window has room to reveal the native sidebar for filter changes.
+        let fixtureRoot = try prepareTimelineOverflowLibrary()
+        let fixtureData = try Data(contentsOf: fixtureRoot.appendingPathComponent("library.json")).base64EncodedString()
+        let app = launch(libraryID: fixtureRoot.lastPathComponent,
+                         arguments: ["--qa-window-size", "1000x760", "--qa-library-data", fixtureData])
+        let newest = firstImprint(in: app)
+        let selectedID = newest.identifier
+        newest.click()
+        XCTAssertTrue(element("editImprint", in: app).waitForExistence(timeout: 5))
+        app.buttons["完成"].click()
+        // Visit the full timeline first so its coordinator has already consumed this selection.
+        // Returning from the filter must locate it again, rather than restoring the filtered viewport.
+        selectMode("时间轴", canvas: "timelineCanvas", app: app)
+        let initialSelection = app.buttons.matching(identifier: selectedID).firstMatch
+        waitFor(NSPredicate(format: "selected == true AND hittable == true"), on: initialSelection)
+        XCTAssertEqual(imprintButtons(in: app).count, 40)
+
+        // A Button in the native sidebar List is exposed as a selectable row, without a button child.
+        let unclassified = app.windows.firstMatch.descendants(matching: .any)
+            .matching(NSPredicate(format: "label BEGINSWITH %@ OR title == %@", "未分类", "未分类")).firstMatch
+        if !unclassified.isHittable {
+            // The workspace initially presents detailOnly; use its native toggle before addressing sidebar rows.
+            let sidebarToggle = app.windows.firstMatch.buttons.matching(NSPredicate(
+                format: "identifier CONTAINS[c] %@ OR label CONTAINS[c] %@ OR label CONTAINS %@ OR title CONTAINS[c] %@ OR title CONTAINS %@",
+                "sidebar", "sidebar", "边栏", "sidebar", "边栏")).firstMatch
+            XCTAssertTrue(sidebarToggle.waitForExistence(timeout: 5))
+            waitFor(NSPredicate(format: "hittable == true"), on: sidebarToggle)
+            sidebarToggle.click()
+        }
+        XCTAssertTrue(unclassified.waitForExistence(timeout: 5))
+        waitFor(NSPredicate(format: "hittable == true"), on: unclassified)
+        unclassified.click()
+        waitFor(NSPredicate(format: "count == 1"), on: imprintButtons(in: app))
+        XCTAssertFalse(app.buttons.matching(identifier: selectedID).firstMatch.exists, "所选最新内容应位于未分类范围之外")
+
+        XCTAssertTrue(element("timelineCanvas", in: app).exists)
+        XCTAssertEqual(imprintButtons(in: app).count, 1)
+        XCTAssertTrue(imprintButtons(in: app).allElementsBoundByIndex.allSatisfy { !$0.isSelected }, "范围外的选中项不应被替换成当前范围内容")
+        XCTAssertFalse(element("editImprint", in: app).exists)
+        let all = app.windows.firstMatch.descendants(matching: .any)
+            .matching(NSPredicate(format: "label BEGINSWITH %@ OR title == %@", "全部印迹", "全部印迹")).firstMatch
+        waitFor(NSPredicate(format: "hittable == true"), on: all)
+        all.click()
+
+        let restored = app.buttons.matching(identifier: selectedID).firstMatch
+        XCTAssertTrue(restored.waitForExistence(timeout: 5))
+        waitFor(NSPredicate(format: "selected == true AND hittable == true"), on: restored)
+        XCTAssertEqual(imprintButtons(in: app).count, 40)
+        XCTAssertFalse(element("editImprint", in: app).exists, "恢复范围只定位选中项，不自动打开阅读面板")
+        keepScreenshot("13-树根时间轴-恢复范围后定位保留的选中项", app: app)
+        app.terminate()
     }
 
     func testUntitledChineseRecordPersistsAcrossRelaunchAndCanBeEdited() throws {
@@ -307,6 +601,7 @@ final class WhisperingTimeUITests: XCTestCase {
             }
             keepScreenshot("09-视觉矩阵-\(name)-\(title)", app: app)
             if title == "日历" { assertCalendarColumns(in: app, configuration: name) }
+            if title == "时间轴" { assertTimelineNavigator(in: app, configuration: name) }
         }
         app.terminate()
     }

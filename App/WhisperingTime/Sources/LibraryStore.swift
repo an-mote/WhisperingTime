@@ -22,10 +22,10 @@ final class LibraryStore {
     var imprints: [Imprint] { snapshot.imprints }
     private var manifestURL: URL { rootURL.appendingPathComponent("library.json") }
 
-    init(rootURL: URL? = nil) {
+    init(rootURL: URL? = nil, demonstration: LibrarySnapshot? = nil) {
         self.rootURL = (rootURL ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("com.acered.whisperingtime.prototype", isDirectory: true)).standardizedFileURL
-        self.demoSnapshot = Self.makeDemoSnapshot()
+        self.demoSnapshot = demonstration ?? Self.makeDemoSnapshot()
         if fileManager.fileExists(atPath: manifestURL.path) {
             do {
                 let data = try Data(contentsOf: manifestURL)

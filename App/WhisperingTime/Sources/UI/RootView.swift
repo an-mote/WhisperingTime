@@ -16,6 +16,7 @@ struct RootView: View {
     @State private var mode: ReviewMode = .cards
     @State private var timeDisplay: TimeDisplay = .hidden
     @State private var selectedID: UUID?
+    @State private var timelineViewport = TimelineViewportState()
     @State private var editorDraft: Imprint?
     @State private var detailID: SelectedImprint?
     @State private var categoryAction: CategoryAction?
@@ -87,10 +88,11 @@ struct RootView: View {
             Button("知道了", role: .cancel) { notice = nil }
         } message: { Text(notice ?? "") }
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("newImprintRequested"))) { _ in newImprint() }
+        .onAppear { if let initialMode = PrototypeQA.reviewMode { mode = initialMode } }
         .onChange(of: scope) { _, _ in
             // Selection is retained across filters and all four views; it becomes visible again when its scope returns.
         }
-        .onChange(of: store.isDemo) { _, _ in selectedID = nil; scope = .all; detailID = nil }
+        .onChange(of: store.isDemo) { _, _ in selectedID = nil; scope = .all; detailID = nil; timelineViewport = TimelineViewportState() }
         .onDisappear { audio.stopPlayback() }
     }
 
@@ -101,7 +103,7 @@ struct RootView: View {
         case .calendar:
             CalendarReview(records: records, store: store, timeDisplay: timeDisplay, selectedID: $selectedID, open: open)
         case .timeline:
-            TimelineReview(records: records, store: store, timeDisplay: timeDisplay, selectedID: $selectedID, open: open)
+            TimelineReview(records: records, store: store, scope: scope, timeDisplay: timeDisplay, selectedID: $selectedID, viewport: $timelineViewport, open: open)
         case .slideshow:
             SlideshowReview(records: records, store: store, audio: audio, timeDisplay: timeDisplay, selectedID: $selectedID, fullScreen: toggleFullScreen, exitPlayback: exitPlayback)
         }
@@ -145,7 +147,7 @@ struct RootView: View {
                 }
             } label: { Label(timeDisplay.title, systemImage: timeDisplay == .hidden ? "clock.badge.questionmark" : "clock") }
             .accessibilityLabel(timeDisplay.title)
-            .accessibilityIdentifier("timeDisplay").help("时间默认隐藏；日历保留日期坐标")
+            .accessibilityIdentifier("timeDisplay").help("时间默认隐藏；日历与时间轴底部保留日期坐标")
         }
         ToolbarItem(placement: .primaryAction) {
             Button(action: newImprint) { Label("补记", systemImage: "square.and.pencil") }

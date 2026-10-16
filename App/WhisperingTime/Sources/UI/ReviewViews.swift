@@ -67,36 +67,6 @@ struct RecordPreviewButton: View {
     }
 }
 
-struct TimelineReview: View {
-    let records: [Imprint]
-    let store: LibraryStore
-    let timeDisplay: TimeDisplay
-    @Binding var selectedID: UUID?
-    var open: (Imprint) -> Void
-    private var chronological: [Imprint] { records.sorted { $0.occurredAt < $1.occurredAt } }
-    var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(chronological) { record in
-                        HStack(alignment: .top, spacing: 16) {
-                            VStack(spacing: 0) {
-                                Image(systemName: selectedID == record.id ? "circle.inset.filled" : "circle")
-                                    .foregroundStyle(selectedID == record.id ? Color.accentColor : Color.secondary)
-                                    .padding(.top, 18).accessibilityHidden(true)
-                                Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 1).frame(maxHeight: .infinity)
-                            }.frame(width: 18)
-                            RecordPreviewButton(record: record, store: store, timeDisplay: timeDisplay, selected: selectedID == record.id) { selectedID = record.id; open(record) }
-                                .padding(.bottom, 20)
-                        }.fixedSize(horizontal: false, vertical: true).id(record.id)
-                    }
-                }.frame(maxWidth: ImprintLayout.readingWidth).padding(.horizontal, ImprintLayout.gutter).padding(.bottom, ImprintLayout.gutter).frame(maxWidth: .infinity)
-            }
-            .onAppear { if let selectedID { proxy.scrollTo(selectedID, anchor: .center) } }
-        }.accessibilityIdentifier("timelineCanvas")
-    }
-}
-
 struct CalendarReview: View {
     let records: [Imprint]
     let store: LibraryStore

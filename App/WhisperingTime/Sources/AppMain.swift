@@ -15,8 +15,9 @@ struct WhisperingTimeApp: App {
             testURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
                 .appendingPathComponent("com.acered.whisperingtime.prototype/UIQA/\(safe)")
         }
-        let library = LibraryStore(rootURL: testURL)
-        if args.contains("--demo") { library.setDemo(true) }
+        let fixture = PrototypeQA.fixtureSnapshot
+        let library = LibraryStore(rootURL: testURL, demonstration: fixture)
+        if args.contains("--demo") || fixture != nil { library.setDemo(true) }
         _store = State(initialValue: library)
     }
 
@@ -68,11 +69,13 @@ final class PrototypeAppDelegate: NSObject, NSApplicationDelegate {
             NSApp.appearance = NSAppearance(named: appearanceName)
         }
         if let size = PrototypeQA.windowSize {
-            observers.append(NotificationCenter.default.addObserver(forName: NSWindow.didBecomeMainNotification, object: nil, queue: .main) { [weak self] note in
+            observers.append(NotificationCenter.default.addObserver(forName: NSWindow.didUpdateNotification, object: nil, queue: .main) { [weak self] note in
                 guard let window = note.object as? NSWindow else { return }
                 MainActor.assumeIsolated {
-                    guard let self, window.title == "印迹", self.configuredQAWindows.insert(ObjectIdentifier(window)).inserted else { return }
-                    // Apply a QA size after AppKit restores the real window, without replacing SwiftUI's delegate.
+                    guard let self, window.title == "印迹", window.isVisible,
+                          !window.styleMask.contains(.fullScreen),
+                          self.configuredQAWindows.insert(ObjectIdentifier(window)).inserted else { return }
+                    // Apply QA sizing after presentation/restoration, including background launches.
                     window.setContentSize(size)
                     if let screen = NSScreen.screens.first(where: { $0.visibleFrame.width >= $0.visibleFrame.height }) ?? NSScreen.main {
                         let area = screen.visibleFrame
@@ -127,6 +130,14 @@ enum PrototypeQA {
         switch argument("--qa-appearance") { case "dark": .dark; case "light": .light; default: nil }
     }
     static var largeText: Bool { flag("--qa-large-text") }
+    /// Read-only QA data travels through launch arguments, without granting the sandbox file access.
+    static var fixtureSnapshot: LibrarySnapshot? {
+        guard let encoded = argument("--qa-library-data"), let data = Data(base64Encoded: encoded) else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .millisecondsSince1970
+        return try? decoder.decode(LibrarySnapshot.self, from: data)
+    }
+    static var reviewMode: ReviewMode? { argument("--qa-review-mode").flatMap(ReviewMode.init(rawValue:)) }
     static var reduceEffects: Bool { flag("--qa-reduce-effects") }
     static var increasedContrast: Bool { flag("--qa-increased-contrast") }
     static var windowSize: NSSize? {
